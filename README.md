@@ -10,7 +10,7 @@ docs/      Prompts/especificações originais (orquestrador, frontend, android)
 ```
 
 ## Baixar o app Android
-[**mirror-control.apk (última versão)**](https://github.com/maria190505d-jpg/mirror-control/releases/latest/download/mirror-control.apk) — passo a passo em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md).
+[**mirror-control.apk (última versão)**](https://github.com/K4LeB-7/mirror-control/releases/latest/download/mirror-control.apk) — passo a passo em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md).
 Site: https://mirror-control.vercel.app
 
 ## Como funciona

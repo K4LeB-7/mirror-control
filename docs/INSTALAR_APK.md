@@ -1,9 +1,9 @@
 # Como baixar e instalar o APK
 
 **Download direto (sempre a versão mais recente):**
-https://github.com/maria190505d-jpg/mirror-control/releases/latest/download/mirror-control.apk
+https://github.com/K4LeB-7/mirror-control/releases/latest/download/mirror-control.apk
 
-Todas as versões: https://github.com/maria190505d-jpg/mirror-control/releases
+Todas as versões: https://github.com/K4LeB-7/mirror-control/releases
 
 ## Instalação no celular
 1. Abra o link acima no navegador do celular e baixe `mirror-control.apk`.
