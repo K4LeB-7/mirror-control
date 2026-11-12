@@ -1,9 +1,9 @@
 # Como baixar e instalar o APK
 
 **Download direto (sempre a versão mais recente):**
-https://github.com/K4LeB-7/mirror-control/releases/latest/download/mirror-control.apk
+https://github.com/K4LeB-7/mirror-control/raw/main/apk/mirror-control.apk
 
-Todas as versões: https://github.com/K4LeB-7/mirror-control/releases
+O APK fica versionado em `apk/` (versão atual em `apk/version.json`); o histórico do Git guarda as versões anteriores.
 
 ## Instalação no celular
 1. Abra o link acima no navegador do celular e baixe `mirror-control.apk`.
@@ -25,6 +25,8 @@ Baixe o APK novamente e instale por cima: não precisa desinstalar, e as configu
 cd android
 # aumente versionCode/versionName em app/build.gradle.kts
 gradle assembleDebug
-gh release create v0.1.2 app/build/outputs/apk/debug/app-debug.apk#mirror-control.apk \
-  --title "v0.1.2" --notes "Correções: ..."
+cp app/build/outputs/apk/debug/app-debug.apk ../apk/mirror-control.apk
+echo '{"version":"0.1.2","versionCode":3}' > ../apk/version.json
+git add ../apk && git commit -m "APK 0.1.2" && git push
 ```
+O link de download acima já serve a versão nova após o push.
