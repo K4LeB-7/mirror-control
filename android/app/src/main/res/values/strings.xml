@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Mirror Control</string>
+    <string name="accessibility_label">Mirror Control (toques remotos)</string>
+    <string name="accessibility_description">Permite que o notebook pareado envie toques e gestos para este aparelho enquanto o espelhamento estiver ativo.</string>
+</resources>

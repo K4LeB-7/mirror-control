@@ -1,0 +1,104 @@
+package com.mirror.gamecontrol
+
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import com.mirror.gamecontrol.databinding.ActivityMainBinding
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var b: ActivityMainBinding
+    private val prefs by lazy { getSharedPreferences("mirror", Context.MODE_PRIVATE) }
+
+    private val scan = registerForActivityResult(ScanContract()) { r ->
+        r.contents?.let { b.roomId.setText(it.trim()) }
+    }
+
+    private val projection = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        val data = r.data
+        if (r.resultCode == RESULT_OK && data != null) {
+            val intent = Intent(this, ScreenShareService::class.java)
+                .putExtra(ScreenShareService.EXTRA_ROOM, roomId())
+                .putExtra(ScreenShareService.EXTRA_PROJECTION, data)
+            ContextCompat.startForegroundService(this, intent)
+        } else {
+            Toast.makeText(this, "Permissão de captura negada", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        requestProjection()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        b = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(b.root)
+
+        b.roomId.setText(prefs.getString("room", ""))
+        b.scanQr.setOnClickListener {
+            scan.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setOrientationLocked(false))
+        }
+        b.openAccessibility.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        b.start.setOnClickListener { startMirroring() }
+        b.stop.setOnClickListener {
+            startService(Intent(this, ScreenShareService::class.java).setAction(ScreenShareService.ACTION_STOP))
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ScreenShareService.statusListener = { s -> runOnUiThread { b.status.text = s } }
+        b.status.text = ScreenShareService.status
+        b.accessibilityState.text =
+            if (accessibilityEnabled()) "✔ Acessibilidade ativa" else "✘ Acessibilidade desativada (sem ela só há vídeo, sem toques)"
+    }
+
+    override fun onPause() {
+        ScreenShareService.statusListener = null
+        super.onPause()
+    }
+
+    private fun roomId() = b.roomId.text.toString().trim().lowercase()
+
+    private fun startMirroring() {
+        val id = roomId()
+        if (!Regex("[a-z0-9]{6,32}").matches(id)) {
+            Toast.makeText(this, "ID da sala inválido", Toast.LENGTH_SHORT).show()
+            return
+        }
+        prefs.edit().putString("room", id).apply()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            requestProjection()
+        }
+    }
+
+    private fun requestProjection() {
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projection.launch(mpm.createScreenCaptureIntent())
+    }
+
+    private fun accessibilityEnabled(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        val me = ComponentName(this, GameAccessibilityService::class.java).flattenToString()
+        return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+    }
+}
