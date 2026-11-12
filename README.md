@@ -44,3 +44,5 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Sem TURN, redes com NAT simétrico/4G podem não conectar (configure TURN no web e em `RtcClient.kt`).
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
+
+Versão atual do app: 0.1.2 (ver `apk/version.json`).
