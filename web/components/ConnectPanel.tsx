@@ -3,7 +3,8 @@ import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import type { SessionState } from "@/lib/session";
 
-const APK_URL = process.env.NEXT_PUBLIC_APK_URL || "/mirror-control.apk";
+const APK_URL = process.env.NEXT_PUBLIC_APK_URL ||
+  "https://github.com/K4LeB-7/mirror-control/raw/main/apk/mirror-control.apk";
 
 type Props = {
   roomId: string;
