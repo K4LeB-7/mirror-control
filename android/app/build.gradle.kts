@@ -11,8 +11,8 @@ android {
         applicationId = "com.mirror.gamecontrol"
         minSdk = 26          // StrokeDescription.continueStroke (toques contínuos) exige API 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = 7
+        versionName = "0.1.6"
     }
 
     // Keystore de debug fixa no repositório: todo APK futuro tem a mesma assinatura,
@@ -47,4 +47,5 @@ dependencies {
     implementation("io.github.webrtc-sdk:android:125.6422.07")   // pacote org.webrtc
     implementation("com.squareup.okhttp3:okhttp:4.12.0")          // WebSocket de sinalização (PeerServer)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0") // leitor de QR
+    testImplementation("junit:junit:4.13.2")
 }

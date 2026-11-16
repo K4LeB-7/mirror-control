@@ -54,3 +54,15 @@ O app e o site usam conexão direta (WebRTC/UDP) e, se ela for bloqueada, um ser
 O painel **Diagnóstico da conexão** do site e o status do app mostram quantos candidatos de rede (host/srflx/relay)
 foram achados; `relay=0` indica que o TURN não está acessível (rede bloqueando a porta 443/80).
 Para uso sério, configure o seu TURN: variáveis `NEXT_PUBLIC_TURN_URL`, `NEXT_PUBLIC_TURN_USER`, `NEXT_PUBLIC_TURN_PASS` na Vercel.
+
+## Conexão por cabo USB (sem Wi-Fi e sem instalar nada no PC)
+1. Cabo USB **de dados** entre celular e PC (o Windows já traz o driver de rede por cabo; nada a instalar).
+2. Celular (Xiaomi/HyperOS): *Configurações → Conexão e compartilhamento → Ponto de acesso portátil → **Tethering USB***.
+   Em outros aparelhos: *Rede e internet → Ponto de acesso e tethering → Tethering USB*.
+3. Windows: se aparecer "Rede nova", escolha **Rede privada**.
+4. No app, a linha **Cabo USB** mostra `rndis0 ✔ 192.168.42.x` quando o cabo foi reconhecido. Se mostrar
+   "tethering desligado", reconecte o cabo e ative o tethering; "aguardando IP…" é normal por alguns segundos.
+5. Abra o site, use o ID da sala e inicie o espelhamento. O WebRTC escolhe sozinho o caminho pelo cabo
+   (candidatos `host` 192.168.42.x no Diagnóstico).
+O tethering usa a internet do celular para o PC se o PC não tiver outra; para o espelhamento só é preciso o cabo
+(a sinalização usa a internet de qualquer dos dois lados).

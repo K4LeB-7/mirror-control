@@ -60,8 +60,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val usbPoll = object : Runnable {
+        override fun run() {
+            b.usbState.text = UsbNet.current()
+            handler.postDelayed(this, 2000)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
+        handler.post(usbPoll)
         ScreenShareService.statusListener = { s -> runOnUiThread { b.status.text = s } }
         b.status.text = ScreenShareService.status
         b.accessibilityState.text =
@@ -69,6 +78,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        handler.removeCallbacks(usbPoll)
         ScreenShareService.statusListener = null
         super.onPause()
     }

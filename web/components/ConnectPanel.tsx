@@ -92,6 +92,18 @@ export default function ConnectPanel({ roomId, state, height, fps, onQuality, on
         </button>
       </div>
 
+      <details className="w-full rounded bg-zinc-900 p-3 text-xs text-zinc-300">
+        <summary className="cursor-pointer select-none text-zinc-400">Modo cabo USB (sem Wi-Fi, sem instalar nada)</summary>
+        <ol className="mt-2 list-decimal space-y-1 pl-5">
+          <li>Ligue o celular ao PC com um cabo USB <b>de dados</b>.</li>
+          <li>
+            No celular: <b>Configurações → Conexão e compartilhamento → Ponto de acesso portátil → Tethering USB</b>.
+          </li>
+          <li>No Windows, se perguntar sobre a rede nova, escolha <b>Rede privada</b>.</li>
+          <li>No app, a linha <b>Cabo USB</b> deve mostrar um IP (ex.: 192.168.42.x). Depois é só iniciar o espelhamento.</li>
+        </ol>
+      </details>
+
       <details className="w-full rounded bg-zinc-900 p-3 text-xs text-zinc-300" open={state.peer !== "connected"}>
         <summary className="cursor-pointer select-none text-zinc-400">Diagnóstico da conexão</summary>
         <pre className="mt-2 whitespace-pre-wrap font-mono">
