@@ -11,6 +11,9 @@ export class InputController {
   private lookDy = 0;
   private raf = 0;
   private attached = false;
+  /** O canal "input" não retransmite: reenvia a posição do joystick enquanto ele estiver ativo. */
+  private joyTimer: ReturnType<typeof setInterval> | null = null;
+  private joyPos = { x: 0, y: 0 };
 
   constructor(
     private session: RemoteSession,
@@ -50,6 +53,7 @@ export class InputController {
     this.down.clear();
     this.activeButtons.clear();
     this.joyActive = false;
+    this.stopJoyRepeat();
     this.lookDx = this.lookDy = 0;
     this.session.sendInput(encodePacket(Action.RELEASE_ALL, 0));
   };
@@ -141,6 +145,7 @@ export class InputController {
     if (vx === 0 && vy === 0) {
       if (this.joyActive) {
         this.joyActive = false;
+        this.stopJoyRepeat();
         this.session.sendInput(encodePacket(Action.UP, POINTER_JOYSTICK));
       }
       return;
@@ -156,6 +161,18 @@ export class InputController {
       // Encosta no centro e arrasta, como um joystick virtual real.
       this.session.sendInput(encodePacket(Action.DOWN, POINTER_JOYSTICK, j.x, j.y));
     }
+    this.joyPos = { x, y };
     this.session.sendInput(encodePacket(Action.MOVE, POINTER_JOYSTICK, x, y));
+    // MOVE repetido é inofensivo no celular (mesma posição); MOVE depois do UP é ignorado lá.
+    if (!this.joyTimer)
+      this.joyTimer = setInterval(() => {
+        if (this.joyActive)
+          this.session.sendInput(encodePacket(Action.MOVE, POINTER_JOYSTICK, this.joyPos.x, this.joyPos.y));
+      }, 100);
+  }
+
+  private stopJoyRepeat() {
+    if (this.joyTimer) clearInterval(this.joyTimer);
+    this.joyTimer = null;
   }
 }

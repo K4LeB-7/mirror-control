@@ -31,6 +31,20 @@ class Signaling(
     private var ws: WebSocket? = null
     private var closed = false
     private var attempts = 0
+    private var gotOpen = false
+
+    /**
+     * O PeerServer NÃO manda "OPEN" quando o mesmo id+token reconecta antes de ele notar a queda do
+     * socket antigo (só troca o socket). Sem isso o app ficava sem heartbeat e sem renegociar.
+     */
+    private val assumeOpen = Runnable {
+        if (!closed && !gotOpen) {
+            gotOpen = true
+            attempts = 0
+            onStatus("Sinalização reconectada")
+            onOpen()
+        }
+    }
 
     private val heartbeat = object : Runnable {
         override fun run() {
@@ -44,23 +58,43 @@ class Signaling(
         val scheme = if (secure) "wss" else "ws"
         val url = "$scheme://$host:$port${path}peerjs?key=$key&id=$myId&token=$token"
         onStatus("Conectando à sinalização…")
+        gotOpen = false
         ws = http.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                val obj = try { JSONObject(text) } catch (e: Exception) { return }
-                when (val type = obj.optString("type")) {
-                    "OPEN" -> {
-                        attempts = 0
-                        main.removeCallbacks(heartbeat)
-                        main.postDelayed(heartbeat, 5000)
-                        main.post { onStatus("Sinalização conectada"); onOpen() }
-                    }
-                    "ID-TAKEN" -> { close(); main.post { onStatus("ID já em uso") } }
-                    else -> main.post { this@Signaling.onMessage(type, obj.optString("src").ifEmpty { null }, obj.optJSONObject("payload")) }
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                main.post {
+                    if (webSocket !== ws || closed) return@post
+                    main.removeCallbacks(heartbeat)
+                    main.postDelayed(heartbeat, 5000)
+                    main.removeCallbacks(assumeOpen)
+                    main.postDelayed(assumeOpen, 2000)
                 }
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = retry()
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = retry()
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                val obj = try { JSONObject(text) } catch (e: Exception) { return }
+                main.post {
+                    if (webSocket !== ws || closed) return@post
+                    when (val type = obj.optString("type")) {
+                        "OPEN" -> {
+                            main.removeCallbacks(assumeOpen)
+                            gotOpen = true
+                            attempts = 0
+                            onStatus("Sinalização conectada")
+                            onOpen()
+                        }
+                        "ID-TAKEN", "ERROR" -> {
+                            main.removeCallbacks(assumeOpen)
+                            gotOpen = true // não é "reconectado"; o socket será fechado pelo servidor → retry()
+                            onStatus(if (type == "ID-TAKEN") "ID já em uso; tentando de novo…"
+                                     else "Erro na sinalização: ${obj.optJSONObject("payload")?.optString("msg")}")
+                        }
+                        else -> this@Signaling.onMessage(type, obj.optString("src").ifEmpty { null }, obj.optJSONObject("payload"))
+                    }
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = retry(webSocket)
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = retry(webSocket)
         })
     }
 
@@ -72,16 +106,22 @@ class Signaling(
     fun close() {
         closed = true
         main.removeCallbacks(heartbeat)
+        main.removeCallbacks(assumeOpen)
         ws?.close(1000, null)
         http.dispatcher.executorService.shutdown()
     }
 
-    private fun retry() {
-        if (closed) return
-        main.removeCallbacks(heartbeat)
-        val delay = minOf(1000L shl attempts.coerceAtMost(4), 15000L)
-        attempts++
-        main.post { onStatus("Sinalização caiu; tentando de novo…") }
-        main.postDelayed({ connect() }, delay)
+    private fun retry(socket: WebSocket) {
+        main.post {
+            // Só o socket atual pode disparar reconexão (evita conexões duplicadas).
+            if (closed || socket !== ws) return@post
+            ws = null
+            main.removeCallbacks(heartbeat)
+            main.removeCallbacks(assumeOpen)
+            val delay = minOf(1000L shl attempts.coerceAtMost(4), 15000L)
+            attempts++
+            onStatus("Sinalização caiu; tentando de novo…")
+            main.postDelayed({ connect() }, delay)
+        }
     }
 }

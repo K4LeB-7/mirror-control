@@ -45,4 +45,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão atual do app: 0.1.3 (ver `apk/version.json`).
+Versão atual do app: 0.1.4 (ver `apk/version.json`).

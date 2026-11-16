@@ -43,7 +43,21 @@ export class Signaling {
     this.onStatus("connecting");
     const ws = new WebSocket(url);
     this.ws = ws;
+    let answered = false;
+    let assumeOpen: ReturnType<typeof setTimeout> | null = null;
+    ws.onopen = () => {
+      // O PeerServer não manda "OPEN" quando o mesmo id+token reconecta antes de notar a queda
+      // do socket antigo; nesse caso ele só troca o socket e a sala continua nossa.
+      assumeOpen = setTimeout(() => {
+        if (this.ws === ws && !answered) {
+          answered = true;
+          this.attempts = 0;
+          this.onStatus("open");
+        }
+      }, 2000);
+    };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       let msg: SignalMessage;
       try {
         msg = JSON.parse(ev.data);
@@ -51,24 +65,32 @@ export class Signaling {
         return;
       }
       if (msg.type === "OPEN") {
+        answered = true;
         this.attempts = 0;
         this.onStatus("open");
       } else if (msg.type === "ID-TAKEN") {
-        this.closed = true;
-        this.onStatus("error", "ID da sala já em uso. Gere um novo ID.");
-        ws.close();
+        // Normalmente é o socket antigo desta mesma aba (recarregou) que o servidor ainda não
+        // derrubou; ele cai sozinho, então tentamos de novo em vez de desistir para sempre.
+        answered = true;
+        this.onStatus("error", "ID da sala em uso (outra aba aberta?). Tentando de novo…");
+      } else if (msg.type === "ERROR") {
+        answered = true;
+        this.onStatus("error", msg.payload?.msg || "Erro do servidor de sinalização");
       } else {
         this.onMessage(msg);
       }
     };
     ws.onclose = () => {
+      if (assumeOpen) clearTimeout(assumeOpen);
+      if (this.ws !== ws) return;
       this.stopHeartbeat();
       if (this.closed) return;
       this.onStatus("closed");
       const delay = Math.min(1000 * 2 ** this.attempts++, 15000);
       this.retry = setTimeout(() => this.connect(), delay);
     };
-    ws.onerror = () => this.onStatus("error", "Falha no servidor de sinalização");
+    ws.onerror = () => this.ws === ws && this.onStatus("error", "Falha no servidor de sinalização");
+    this.stopHeartbeat();
     this.heartbeat = setInterval(() => this.raw({ type: "HEARTBEAT" }), 5000);
   }
 
