@@ -2,6 +2,7 @@
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 import type { SessionState } from "@/lib/session";
+import { UsbConnectCard } from "./UsbPanel";
 
 const APK_URL = process.env.NEXT_PUBLIC_APK_URL ||
   "https://github.com/K4LeB-7/mirror-control/raw/main/apk/mirror-control.apk";
@@ -16,6 +17,11 @@ type Props = {
   onOpenMapper: () => void;
   /** Usa o ID digitado (por exemplo o que já está no app Android). */
   onSetRoom: (id: string) => void;
+  /** Modo USB (ADB/WebUSB): PIN digitado, clique em conectar e erro antes da sessão existir. */
+  usbPin: string;
+  onUsbPin: (pin: string) => void;
+  onUsbConnect: () => void;
+  usbNote?: string;
 };
 
 const peerText: Record<SessionState["peer"], string> = {
@@ -26,7 +32,9 @@ const peerText: Record<SessionState["peer"], string> = {
   failed: "Conexão perdida. O app tentará reconectar.",
 };
 
-export default function ConnectPanel({ roomId, state, height, fps, onQuality, onNewRoom, onOpenMapper, onSetRoom }: Props) {
+export default function ConnectPanel({
+  roomId, state, height, fps, onQuality, onNewRoom, onOpenMapper, onSetRoom, usbPin, onUsbPin, onUsbConnect, usbNote,
+}: Props) {
   const [qr, setQr] = useState("");
   const [typed, setTyped] = useState("");
   const typedId = typed.trim().toLowerCase();
@@ -115,8 +123,10 @@ export default function ConnectPanel({ roomId, state, height, fps, onQuality, on
         </button>
       </div>
 
+      <UsbConnectCard pin={usbPin} onPin={onUsbPin} onConnect={onUsbConnect} note={usbNote} />
+
       <details className="w-full rounded bg-zinc-900 p-3 text-xs text-zinc-300">
-        <summary className="cursor-pointer select-none text-zinc-400">Modo cabo USB (sem Wi-Fi, sem instalar nada)</summary>
+        <summary className="cursor-pointer select-none text-zinc-400">Cabo USB por tethering (rede pelo cabo, modo WebRTC)</summary>
         <ol className="mt-2 list-decimal space-y-1 pl-5">
           <li>Ligue o celular ao PC com um cabo USB <b>de dados</b>.</li>
           <li>

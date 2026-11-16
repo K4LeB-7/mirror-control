@@ -55,7 +55,56 @@ O painel **Diagnóstico da conexão** do site e o status do app mostram quantos 
 foram achados; `relay=0` indica que o TURN não está acessível (rede bloqueando a porta 443/80).
 Para uso sério, configure o seu TURN: variáveis `NEXT_PUBLIC_TURN_URL`, `NEXT_PUBLIC_TURN_USER`, `NEXT_PUBLIC_TURN_PASS` na Vercel.
 
-## Conexão por cabo USB (sem Wi-Fi e sem instalar nada no PC)
+## Modo USB (ADB) — pelo cabo, sem Wi-Fi, sem servidor e sem instalar nada no PC (app 0.2.0+)
+O navegador fala ADB direto com o celular pelo cabo (WebUSB). Não passa pela rede, então firewall, Wi-Fi e
+servidor de sinalização não importam. Precisa do **Google Chrome ou Microsoft Edge** no computador.
+
+**Uma vez só (preparação do celular):**
+1. Ative as *Opções do desenvolvedor*: *Configurações → Sobre o telefone* → toque 7× em **Número da versão**
+   (Xiaomi/HyperOS: **Versão do SO**/"Versão MIUI").
+2. *Configurações → Opções do desenvolvedor* (Xiaomi: *Configurações adicionais → Opções do desenvolvedor*) →
+   ligue **Depuração USB**. (Os toques vêm do serviço de acessibilidade do app, não do ADB: a opção do Xiaomi
+   "Depuração USB (configurações de segurança)" não é necessária.)
+3. No Windows o driver **"Android ADB Interface"** precisa estar instalado (já está no seu PC). Sem ele o Chrome não
+   lista o aparelho.
+
+**Toda vez:**
+1. Ligue o cabo USB **de dados**. Se o celular perguntar o modo USB, "Transferência de arquivos" ou "Só carregar" servem.
+2. No app: **1. Ativar serviço de acessibilidade** (se ainda não estiver) → **Iniciar modo USB (ADB)** → aceite a
+   captura de tela. O app mostra um **PIN de 6 dígitos** (muda a cada vez que o modo USB é iniciado).
+3. No PC, **feche qualquer `adb` em execução** (Android Studio, scrcpy, Vysor, ferramentas da Xiaomi). Se você usa adb
+   no terminal: `adb kill-server`. Só um programa por vez pode usar a interface ADB.
+4. Abra https://mirror-control.vercel.app no Chrome/Edge, digite o PIN no cartão **Conectar por cabo USB (ADB)** e
+   toque em **Conectar por USB (ADB)** → escolha o celular na janela do Chrome → **Conectar**.
+5. Na 1ª vez, o celular pergunta **"Permitir depuração USB?"** com a impressão digital da chave do navegador: marque
+   **Sempre permitir deste computador** e toque em **Permitir**. (A chave fica guardada neste navegador; outro
+   navegador/perfil ou limpar os dados do site pede de novo.)
+6. O vídeo aparece; clique nele para capturar o mouse (ESC solta). Teclas, mouse e mapeamento funcionam igual ao modo Wi-Fi.
+Se o cabo for solto e recolocado, o site reconecta sozinho (com o app ainda em modo USB). Para voltar ao modo Wi-Fi/QR,
+use **Sair do USB** no site; no app, iniciar o espelhamento normal encerra o modo USB (um modo por vez).
+
+### Problemas comuns do modo USB
+- **"Este navegador não tem WebUSB"**: use Chrome ou Edge no computador (Firefox, Safari e navegadores de celular não
+  têm WebUSB). O site precisa estar em https:// (a Vercel já é).
+- **A janela do Chrome não lista o celular**: cabo só de carga (troque), Depuração USB desligada, ou o driver "Android
+  ADB Interface" ausente (Gerenciador de Dispositivos do Windows). Desconecte e reconecte o cabo.
+- **"Interface em uso por outro programa… `adb kill-server`"**: o `adb.exe` do PC (ou Android Studio/scrcpy/Vysor)
+  está segurando o celular. Feche-os ou rode `adb kill-server`; o site tenta de novo sozinho a cada 3 s. O adb volta a
+  funcionar normalmente depois que você clicar em **Sair do USB** no site.
+- **Fica em "Confirme Permitir depuração USB"**: desbloqueie a tela do celular e aceite o aviso. Se tocou em Negar,
+  solte e recoloque o cabo. Se não aparece aviso nenhum: *Opções do desenvolvedor → Revogar autorizações de depuração
+  USB* e conecte de novo.
+- **"O app não está em modo USB"**: o ADB funcionou, mas o app não está escutando. Toque em **Iniciar modo USB (ADB)**
+  no app (e aceite a captura). O site continua tentando sozinho.
+- **"PIN errado"**: confira o PIN atual na tela do app (ele muda a cada início do modo USB). Após 5 erros seguidos o
+  app bloqueia novas tentativas por 1 min (e o dobro a cada novo bloqueio).
+- **Vídeo some ao bloquear a tela / após um tempo (Xiaomi/HyperOS)**: *Configurações → Apps → Mirror Control →
+  Economia de bateria → Sem restrições* e ative **Início automático**. Mantenha a notificação "Mirror Control ativo".
+- **Toques não funcionam, só vídeo**: serviço de acessibilidade desligado (passo 1 do app; no Android 13+ veja
+  "configurações restritas" acima).
+- **Imagem pesada/atrasada**: escolha 720p e/ou 30 fps no menu do site; use uma porta USB do próprio PC (não hub).
+
+## Conexão por cabo USB via tethering (rede pelo cabo, modo WebRTC)
 1. Cabo USB **de dados** entre celular e PC (o Windows já traz o driver de rede por cabo; nada a instalar).
 2. Celular (Xiaomi/HyperOS): *Configurações → Conexão e compartilhamento → Ponto de acesso portátil → **Tethering USB***.
    Em outros aparelhos: *Rede e internet → Ponto de acesso e tethering → Tethering USB*.

@@ -26,12 +26,16 @@ class MainActivity : AppCompatActivity() {
         r.contents?.let { b.roomId.setText(it.trim()) }
     }
 
+    /** Modo pedido no último toque: WebRTC ("2. Iniciar espelhamento") ou USB/ADB. */
+    private var usbRequested = false
+
     private val projection = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val data = r.data
         if (r.resultCode == RESULT_OK && data != null) {
             val intent = Intent(this, ScreenShareService::class.java)
-                .putExtra(ScreenShareService.EXTRA_ROOM, roomId())
                 .putExtra(ScreenShareService.EXTRA_PROJECTION, data)
+            if (usbRequested) intent.putExtra(ScreenShareService.EXTRA_MODE, ScreenShareService.MODE_USB)
+            else intent.putExtra(ScreenShareService.EXTRA_ROOM, roomId())
             ContextCompat.startForegroundService(this, intent)
         } else {
             Toast.makeText(this, "Permissão de captura negada", Toast.LENGTH_SHORT).show()
@@ -55,6 +59,10 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
         b.start.setOnClickListener { startMirroring() }
+        b.startUsb.setOnClickListener {
+            usbRequested = true
+            askPermissionsThenProject()
+        }
         b.stop.setOnClickListener {
             startService(Intent(this, ScreenShareService::class.java).setAction(ScreenShareService.ACTION_STOP))
         }
@@ -71,8 +79,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         handler.post(usbPoll)
-        ScreenShareService.statusListener = { s -> runOnUiThread { b.status.text = s } }
-        b.status.text = ScreenShareService.status
+        ScreenShareService.statusListener = { s -> runOnUiThread { showStatus(s) } }
+        showStatus(ScreenShareService.status)
         b.accessibilityState.text =
             if (accessibilityEnabled()) "✔ Acessibilidade ativa" else "✘ Acessibilidade desativada (sem ela só há vídeo, sem toques)"
     }
@@ -81,6 +89,13 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(usbPoll)
         ScreenShareService.statusListener = null
         super.onPause()
+    }
+
+    private fun showStatus(s: String) {
+        b.status.text = s
+        val pin = ScreenShareService.usbPin
+        b.usbPin.text = if (pin != null) "PIN do modo USB: ${pin.chunked(3).joinToString(" ")}" else ""
+        b.usbPin.visibility = if (pin != null) android.view.View.VISIBLE else android.view.View.GONE
     }
 
     private fun roomId() = b.roomId.text.toString().trim().lowercase()
@@ -92,6 +107,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         prefs.edit().putString("room", id).apply()
+        usbRequested = false
+        askPermissionsThenProject()
+    }
+
+    private fun askPermissionsThenProject() {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {

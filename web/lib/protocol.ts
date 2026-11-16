@@ -41,5 +41,8 @@ export function encodePacket(
   return buffer;
 }
 
-/** Mensagens de controle (DataChannel "ctrl", confiável, JSON). */
-export type CtrlMessage = { type: "quality"; height: number; fps: number };
+/**
+ * Mensagens de controle (DataChannel "ctrl" no WebRTC; quadro CTRL no modo USB). JSON.
+ * "keyframe" só é usada no modo USB (pede um quadro-chave ao encoder após perda/erro de decodificação).
+ */
+export type CtrlMessage = { type: "quality"; height: number; fps: number } | { type: "keyframe" };

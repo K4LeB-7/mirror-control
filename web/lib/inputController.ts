@@ -1,6 +1,8 @@
 import { Action, POINTER_JOYSTICK, POINTER_LOOK, encodePacket } from "./protocol";
 import { Layout } from "./layout";
-import type { RemoteSession } from "./session";
+
+/** O que o controlador precisa de uma sessão (WebRTC `RemoteSession` ou USB `UsbSession`). */
+export type InputSink = { sendInput(buf: ArrayBuffer): void };
 
 /** Converte teclado + mouse (Pointer Lock) em pacotes binários de toque. */
 export class InputController {
@@ -16,7 +18,7 @@ export class InputController {
   private joyPos = { x: 0, y: 0 };
 
   constructor(
-    private session: RemoteSession,
+    private session: InputSink,
     private getLayout: () => Layout,
     private getAspect: () => number, // largura/altura do vídeo
     private isLocked: () => boolean

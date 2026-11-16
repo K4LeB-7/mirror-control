@@ -2,9 +2,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ConnectPanel from "@/components/ConnectPanel";
 import MapperOverlay from "@/components/MapperOverlay";
+import UsbPanel from "@/components/UsbPanel";
 import { InputController } from "@/lib/inputController";
 import { DEFAULT_LAYOUT, Layout, loadLayout, saveLayout } from "@/lib/layout";
 import { RemoteSession, SessionState } from "@/lib/session";
+import type { UsbSession, UsbSessionState } from "@/lib/usbSession";
+import { ChannelOpener, UsbConnectError, requestUsbDevice } from "@/lib/usbTransport";
 
 const ROOM_KEY = "mirror-control.room";
 
@@ -24,8 +27,16 @@ export default function Page() {
   const [locked, setLocked] = useState(false);
   const [aspect, setAspect] = useState(16 / 9);
   const [quality, setQuality] = useState({ height: 720, fps: 60 });
+  // Modo USB (ADB via WebUSB). Em modo USB a sessão WebRTC fica fechada (um modo por vez, como no app).
+  const [mode, setMode] = useState<"webrtc" | "usb">("webrtc");
+  const [usbSession, setUsbSession] = useState<UsbSession | null>(null);
+  const [usbState, setUsbState] = useState<UsbSessionState | null>(null);
+  const [usbPin, setUsbPin] = useState("");
+  const [usbNote, setUsbNote] = useState<string | undefined>();
+  const [usbBusy, setUsbBusy] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sessionRef = useRef<RemoteSession | null>(null);
   const layoutRef = useRef(layout);
   const aspectRef = useRef(aspect);
@@ -54,7 +65,7 @@ export default function Page() {
 
   // Sessão WebRTC + controlador de entrada.
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || mode !== "webrtc") return;
     const session = new RemoteSession(roomId, { onState: setState, onStream: setStream });
     sessionRef.current = session;
     const input = new InputController(
@@ -77,7 +88,42 @@ export default function Page() {
       session.close();
       sessionRef.current = null;
     };
-  }, [roomId]);
+  }, [roomId, mode]);
+
+  // Sessão USB: mesmo controlador de entrada, com o <canvas> como alvo do Pointer Lock.
+  useEffect(() => {
+    if (!usbSession) return;
+    const input = new InputController(
+      usbSession,
+      () => layoutRef.current,
+      () => aspectRef.current,
+      () => lockedRef.current
+    );
+    input.attach();
+    const onLockChange = () => {
+      const isLocked = !!canvasRef.current && document.pointerLockElement === canvasRef.current;
+      lockedRef.current = isLocked;
+      setLocked(isLocked);
+      if (!isLocked) input.releaseAll();
+    };
+    document.addEventListener("pointerlockchange", onLockChange);
+    return () => {
+      document.removeEventListener("pointerlockchange", onLockChange);
+      input.detach();
+      usbSession.close();
+    };
+  }, [usbSession]);
+
+  // Proporção do canvas = a do vídeo que o celular anunciou (INFO).
+  const usbInfo = usbState?.info;
+  useEffect(() => {
+    if (usbInfo) setAspect(usbInfo.width / usbInfo.height);
+  }, [usbInfo]);
+
+  // Qualidade no modo USB: a sessão guarda e reenvia a cada (re)conexão.
+  useEffect(() => {
+    usbSession?.sendCtrl({ type: "quality", ...quality });
+  }, [usbSession, quality]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -99,6 +145,52 @@ export default function Page() {
 
   const changeQuality = (height: number, fps: number) => setQuality({ height, fps });
 
+  /** Clique em "Conectar por USB (ADB)": o seletor do WebUSB precisa ser aberto aqui, no gesto do usuário. */
+  const connectUsb = async () => {
+    if (usbBusy) return;
+    setUsbNote(undefined);
+    // Testes e2e injetam um transporte falso (sem USB real).
+    const fake = (window as unknown as { __mirrorUsbTestOpener?: () => ChannelOpener }).__mirrorUsbTestOpener;
+    let opener: ChannelOpener;
+    setUsbBusy(true);
+    try {
+      if (fake) opener = fake();
+      else {
+        const device = await requestUsbDevice();
+        if (!device) {
+          setUsbNote(
+            "Nenhum aparelho escolhido. Se a lista estava vazia: cabo de dados, Depuração USB ligada no celular e o adb do PC fechado (adb kill-server)."
+          );
+          return;
+        }
+        const { createAdbOpener } = await import("@/lib/adbTransport"); // carregado só agora
+        opener = createAdbOpener(device);
+      }
+      const { UsbSession } = await import("@/lib/usbSession");
+      const s = new UsbSession(opener, usbPin, { onState: setUsbState });
+      if (document.pointerLockElement) document.exitPointerLock();
+      setStream(null);
+      setPreview(false);
+      setEditing(false);
+      setUsbState(s.snapshot);
+      setUsbSession(s); // o efeito acima fecha a sessão anterior
+      setMode("usb");
+    } catch (e) {
+      setUsbNote(e instanceof UsbConnectError ? e.message : `Falha ao iniciar o modo USB: ${String(e)}`);
+    } finally {
+      setUsbBusy(false);
+    }
+  };
+
+  const leaveUsb = () => {
+    if (document.pointerLockElement) document.exitPointerLock();
+    setUsbSession(null);
+    setUsbState(null);
+    setEditing(false);
+    setMode("webrtc");
+    setState({ signaling: "connecting", peer: "waiting", log: [] });
+  };
+
   const newRoom = (given?: string) => {
     const id = given ?? newRoomId();
     try {
@@ -111,15 +203,29 @@ export default function Page() {
 
   const requestLock = () => {
     if (editing) return;
+    const el: HTMLElement | null = mode === "usb" ? canvasRef.current : videoRef.current;
     // @ts-expect-error unadjustedMovement é suportado no Chromium (mouse sem aceleração)
-    videoRef.current?.requestPointerLock({ unadjustedMovement: true })?.catch?.(() =>
-      videoRef.current?.requestPointerLock()
-    );
+    el?.requestPointerLock({ unadjustedMovement: true })?.catch?.(() => el?.requestPointerLock());
   };
 
   if (!roomId) return null;
 
-  if (!stream && !preview) {
+  const usbMode = mode === "usb" && !!usbState;
+  if (usbMode && !usbState.info) {
+    return (
+      <UsbPanel
+        state={usbState}
+        onBack={leaveUsb}
+        pin={usbPin}
+        onPin={setUsbPin}
+        onConnect={connectUsb}
+        note={usbNote}
+        busy={usbBusy}
+      />
+    );
+  }
+
+  if (!usbMode && !stream && !preview) {
     return (
       <ConnectPanel
         roomId={roomId}
@@ -134,6 +240,10 @@ export default function Page() {
           setEditing(true);
           setPreview(true);
         }}
+        usbPin={usbPin}
+        onUsbPin={setUsbPin}
+        onUsbConnect={connectUsb}
+        usbNote={usbNote}
       />
     );
   }
@@ -144,7 +254,18 @@ export default function Page() {
         className="relative"
         style={{ aspectRatio: String(aspect), width: `min(100vw, calc(100vh * ${aspect}))` }}
       >
-        {!stream && (
+        {usbMode && (
+          <canvas
+            ref={(el) => {
+              canvasRef.current = el;
+              usbSession?.setCanvas(el);
+            }}
+            data-testid="usb-canvas"
+            onClick={requestLock}
+            className="absolute inset-0 h-full w-full cursor-pointer bg-black"
+          />
+        )}
+        {!stream && !usbMode && (
           <div className="absolute inset-0 flex items-center justify-center bg-zinc-800 text-sm text-zinc-400">
             Pré-visualização (sem celular conectado)
           </div>
@@ -163,7 +284,7 @@ export default function Page() {
             const v = e.currentTarget;
             if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight);
           }}
-          className={`absolute inset-0 h-full w-full cursor-pointer ${stream ? "" : "hidden"}`}
+          className={`absolute inset-0 h-full w-full cursor-pointer ${stream && !usbMode ? "" : "hidden"}`}
         />
         <MapperOverlay layout={layout} editing={editing} onChange={updateLayout} />
 
@@ -171,8 +292,18 @@ export default function Page() {
           {!locked && !editing && (
             <span className="rounded bg-black/70 px-2 py-1">Clique no vídeo para capturar o mouse (ESC solta)</span>
           )}
-          {stream && state.peer !== "connected" && (
+          {stream && !usbMode && state.peer !== "connected" && (
             <span className="rounded bg-amber-700 px-2 py-1">Reconectando…</span>
+          )}
+          {usbMode && usbState.peer !== "connected" && (
+            <span data-testid="usb-reconnecting" className="max-w-xs rounded bg-amber-700 px-2 py-1">
+              {usbState.peer === "failed" ? usbState.error ?? "USB desconectado" : "USB: reconectando…"}
+            </span>
+          )}
+          {usbMode && (
+            <button className="rounded bg-black/70 px-2 py-1 hover:bg-black" onClick={leaveUsb}>
+              Sair do USB
+            </button>
           )}
           <button
             className="rounded bg-black/70 px-2 py-1 hover:bg-black"

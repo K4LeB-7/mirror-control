@@ -6,9 +6,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:usb": "node --experimental-strip-types --test tests/usbWire.test.ts"
   },
   "dependencies": {
+    "@yume-chan/adb": "2.6.4",
+    "@yume-chan/adb-credential-web": "2.1.0",
+    "@yume-chan/adb-daemon-webusb": "2.3.2",
     "next": "14.2.15",
     "qrcode": "1.5.4",
     "react": "18.3.1",

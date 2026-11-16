@@ -65,6 +65,23 @@
             android:text="2. Iniciar espelhamento" />
 
         <Button
+            android:id="@+id/startUsb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Iniciar modo USB (ADB)" />
+
+        <TextView
+            android:id="@+id/usbPin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:gravity="center"
+            android:textIsSelectable="true"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
+
+        <Button
             android:id="@+id/stop"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

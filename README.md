@@ -21,6 +21,9 @@ Site: https://mirror-control.vercel.app
    - `input` — `ordered:false, maxRetransmits:0`, pacote binário de 18 bytes
      `[action u8, keyId u8, x f32, y f32, dx f32, dy f32]` (ver `web/lib/protocol.ts` ↔ `InputProtocol.kt`).
    - `ctrl` — confiável, JSON (resolução 720p/1080p, 30/60 fps).
+   **Modo USB (ADB, app 0.2.0+)**: sem rede nem servidor — o navegador fala ADB pelo cabo via WebUSB (Chrome/Edge),
+   abre `tcp:27183` no celular e recebe H.264 (WebCodecs → `<canvas>`); entrada no mesmo pacote de 18 bytes.
+   Protocolo em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md), passo a passo em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md).
 4. Mapeamento por **percentual** (0.0–1.0) da tela → funciona em qualquer proporção.
    WASD vira um joystick virtual (um dedo que arrasta), mouse + Pointer Lock vira o dedo da câmera,
    teclas/botões do mouse viram toques fixos. Há editor visual ("Mapear teclas").
@@ -45,4 +48,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão atual do app: 0.1.6 (ver `apk/version.json`).
+Versão atual do app: 0.2.0 (ver `apk/version.json`).
