@@ -5,6 +5,8 @@ export type SessionState = {
   signaling: "connecting" | "open" | "closed" | "error";
   peer: "waiting" | "connecting" | "connected" | "disconnected" | "failed";
   error?: string;
+  /** Últimos eventos (mais novos por último) para diagnóstico na tela. */
+  log: string[];
 };
 
 type Listeners = {
@@ -36,14 +38,17 @@ export class RemoteSession {
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private input: RTCDataChannel | null = null;
   private ctrl: RTCDataChannel | null = null;
-  private state: SessionState = { signaling: "connecting", peer: "waiting" };
+  private state: SessionState = { signaling: "connecting", peer: "waiting", log: [] };
 
   constructor(public roomId: string, private l: Listeners) {
     this.signaling = new Signaling(
       DEFAULT_SIGNALING,
       roomId,
       (m) => this.onSignal(m),
-      (s, detail) => this.patch({ signaling: s, error: s === "error" ? detail : undefined })
+      (s, detail) => {
+        this.patch({ signaling: s, error: s === "error" ? detail : undefined });
+        this.note(`Sinalização: ${s}${detail ? " — " + detail : ""}`);
+      }
     );
     this.signaling.connect();
   }
@@ -70,12 +75,18 @@ export class RemoteSession {
     this.l.onState(this.state);
   }
 
+  private note(msg: string) {
+    const t = new Date().toLocaleTimeString("pt-BR");
+    this.patch({ log: [...this.state.log, `${t}  ${msg}`].slice(-12) });
+  }
+
   private async onSignal(m: SignalMessage) {
     try {
       if (m.type === "OFFER" && m.src) {
         // Só aceita o par que já está conectado ou, se livre, o primeiro que ofertar.
         const busy = this.pc && this.pc.connectionState === "connected";
         if (busy && m.src !== this.peerId) return;
+        this.note("Oferta recebida do celular");
         await this.handleOffer(m.src, m.payload);
       } else if (m.type === "CANDIDATE" && m.src === this.peerId && m.payload) {
         if (this.pc?.remoteDescription) await this.pc.addIceCandidate(m.payload);
@@ -97,7 +108,11 @@ export class RemoteSession {
     pc.onicecandidate = (ev) => {
       if (ev.candidate) this.signaling.send("CANDIDATE", src, ev.candidate.toJSON());
     };
-    pc.ontrack = (ev) => this.l.onStream(ev.streams[0] ?? new MediaStream([ev.track]));
+    pc.ontrack = (ev) => {
+      this.note("Vídeo do celular recebido");
+      this.l.onStream(ev.streams[0] ?? new MediaStream([ev.track]));
+    };
+    pc.oniceconnectionstatechange = () => this.note(`ICE: ${pc.iceConnectionState}`);
     pc.ondatachannel = (ev) => {
       if (ev.channel.label === "input") {
         ev.channel.binaryType = "arraybuffer";
@@ -109,6 +124,7 @@ export class RemoteSession {
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
       const s = pc.connectionState;
+      this.note(`Conexão: ${s}`);
       if (s === "connected") this.patch({ peer: "connected" });
       else if (s === "disconnected") this.patch({ peer: "disconnected" });
       else if (s === "failed" || s === "closed") {
@@ -123,6 +139,7 @@ export class RemoteSession {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     this.signaling.send("ANSWER", src, pc.localDescription!.toJSON());
+    this.note("Resposta enviada ao celular");
   }
 
   private teardownPc() {

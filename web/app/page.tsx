@@ -16,10 +16,11 @@ function newRoomId() {
 
 export default function Page() {
   const [roomId, setRoomId] = useState("");
-  const [state, setState] = useState<SessionState>({ signaling: "connecting", peer: "waiting" });
+  const [state, setState] = useState<SessionState>({ signaling: "connecting", peer: "waiting", log: [] });
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT);
   const [editing, setEditing] = useState(false);
+  const [preview, setPreview] = useState(false); // editor de teclas sem celular conectado
   const [locked, setLocked] = useState(false);
   const [aspect, setAspect] = useState(16 / 9);
   const [quality, setQuality] = useState({ height: 720, fps: 60 });
@@ -101,7 +102,7 @@ export default function Page() {
       localStorage.setItem(ROOM_KEY, id);
     } catch {}
     setStream(null);
-    setState({ signaling: "connecting", peer: "waiting" });
+    setState({ signaling: "connecting", peer: "waiting", log: [] });
     setRoomId(id);
   };
 
@@ -115,7 +116,7 @@ export default function Page() {
 
   if (!roomId) return null;
 
-  if (!stream) {
+  if (!stream && !preview) {
     return (
       <ConnectPanel
         roomId={roomId}
@@ -124,6 +125,11 @@ export default function Page() {
         fps={quality.fps}
         onQuality={changeQuality}
         onNewRoom={newRoom}
+        onOpenMapper={() => {
+          setAspect(20 / 9);
+          setEditing(true);
+          setPreview(true);
+        }}
       />
     );
   }
@@ -134,6 +140,11 @@ export default function Page() {
         className="relative"
         style={{ aspectRatio: String(aspect), width: `min(100vw, calc(100vh * ${aspect}))` }}
       >
+        {!stream && (
+          <div className="absolute inset-0 flex items-center justify-center bg-zinc-800 text-sm text-zinc-400">
+            Pré-visualização (sem celular conectado)
+          </div>
+        )}
         <video
           ref={videoRef}
           autoPlay
@@ -148,7 +159,7 @@ export default function Page() {
             const v = e.currentTarget;
             if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight);
           }}
-          className="absolute inset-0 h-full w-full cursor-pointer"
+          className={`absolute inset-0 h-full w-full cursor-pointer ${stream ? "" : "hidden"}`}
         />
         <MapperOverlay layout={layout} editing={editing} onChange={updateLayout} />
 
@@ -156,7 +167,7 @@ export default function Page() {
           {!locked && !editing && (
             <span className="rounded bg-black/70 px-2 py-1">Clique no vídeo para capturar o mouse (ESC solta)</span>
           )}
-          {state.peer !== "connected" && (
+          {stream && state.peer !== "connected" && (
             <span className="rounded bg-amber-700 px-2 py-1">Reconectando…</span>
           )}
           <button
@@ -168,6 +179,17 @@ export default function Page() {
           >
             {editing ? "Concluir" : "Mapear teclas"}
           </button>
+          {preview && !stream && (
+            <button
+              className="rounded bg-black/70 px-2 py-1 hover:bg-black"
+              onClick={() => {
+                setEditing(false);
+                setPreview(false);
+              }}
+            >
+              Voltar
+            </button>
+          )}
           {editing && (
             <button className="rounded bg-black/70 px-2 py-1" onClick={() => updateLayout(structuredClone(DEFAULT_LAYOUT))}>
               Restaurar

@@ -30,3 +30,14 @@ echo '{"version":"0.1.2","versionCode":3}' > ../apk/version.json
 git add ../apk && git commit -m "APK 0.1.2" && git push
 ```
 O link de download acima já serve a versão nova após o push.
+
+## Problemas comuns
+- **Acessibilidade bloqueada ("configurações restritas", Xiaomi/Android 13+):** toque no item bloqueado e confirme o aviso;
+  depois *Configurações → Apps → Gerenciar apps → Mirror Control → ⋮ → Permitir configurações restritas*.
+- **"Conteúdo oculto por compartilhamento de tela por segurança":** aviso do próprio Android (notificações e senhas
+  ficam ocultas enquanto a tela é compartilhada). Não é erro do app.
+- **Site sem vídeo:** o app mostra na tela principal em que etapa parou ("Sinalização conectada", "Oferta enviada",
+  "Resposta recebida", "ICE: connected/failed…") e o site tem o painel **Diagnóstico da conexão**. Celular e notebook
+  devem estar na **mesma rede Wi-Fi** (sem "isolamento de clientes"/rede de convidados); em redes diferentes é preciso um
+  servidor TURN. Use o ID mostrado no site (um ID antigo não conecta).
+- **Mapear teclas sem o celular:** botão **Mapear teclas e mouse** na tela inicial do site.

@@ -13,6 +13,7 @@ type Props = {
   fps: number;
   onQuality: (height: number, fps: number) => void;
   onNewRoom: () => void;
+  onOpenMapper: () => void;
 };
 
 const peerText: Record<SessionState["peer"], string> = {
@@ -23,7 +24,7 @@ const peerText: Record<SessionState["peer"], string> = {
   failed: "Conexão perdida. O app tentará reconectar.",
 };
 
-export default function ConnectPanel({ roomId, state, height, fps, onQuality, onNewRoom }: Props) {
+export default function ConnectPanel({ roomId, state, height, fps, onQuality, onNewRoom, onOpenMapper }: Props) {
   const [qr, setQr] = useState("");
 
   useEffect(() => {
@@ -86,7 +87,17 @@ export default function ConnectPanel({ roomId, state, height, fps, onQuality, on
         <button className="rounded bg-zinc-800 px-3 py-1 hover:bg-zinc-700" onClick={onNewRoom}>
           Novo ID
         </button>
+        <button className="rounded bg-sky-700 px-3 py-1 hover:bg-sky-600" onClick={onOpenMapper}>
+          Mapear teclas e mouse
+        </button>
       </div>
+
+      <details className="w-full rounded bg-zinc-900 p-3 text-xs text-zinc-300" open={state.peer !== "connected"}>
+        <summary className="cursor-pointer select-none text-zinc-400">Diagnóstico da conexão</summary>
+        <pre className="mt-2 whitespace-pre-wrap font-mono">
+          {state.log.length ? state.log.join("\n") : "Sem eventos ainda."}
+        </pre>
+      </details>
     </main>
   );
 }

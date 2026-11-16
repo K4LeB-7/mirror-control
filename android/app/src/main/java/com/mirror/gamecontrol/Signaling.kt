@@ -52,7 +52,7 @@ class Signaling(
                         attempts = 0
                         main.removeCallbacks(heartbeat)
                         main.postDelayed(heartbeat, 5000)
-                        main.post { onOpen() }
+                        main.post { onStatus("Sinalização conectada"); onOpen() }
                     }
                     "ID-TAKEN" -> { close(); main.post { onStatus("ID já em uso") } }
                     else -> main.post { this@Signaling.onMessage(type, obj.optString("src").ifEmpty { null }, obj.optJSONObject("payload")) }

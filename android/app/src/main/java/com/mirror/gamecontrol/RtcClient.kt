@@ -44,6 +44,10 @@ class RtcClient(
     private var disposed = false
     private var warnedNoAccessibility = false
 
+    // Candidatos só podem seguir DEPOIS da oferta; senão o navegador os descarta.
+    private var offerSent = false
+    private val queuedCandidates = mutableListOf<JSONObject>()
+
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
     )
@@ -140,13 +144,26 @@ class RtcClient(
 
     // ---------------------------------------------------------------- negociação
 
-    private val retryNegotiation = Runnable { negotiate(force = true) }
+    /** Sem ANSWER em 10 s: o site provavelmente ainda não estava aberto → oferece de novo. */
+    private val retryNoAnswer = Runnable {
+        onStatus("Sem resposta do navegador; tentando de novo…")
+        negotiate(force = true)
+    }
+
+    /** Respondeu mas o ICE não fechou em 30 s (rede bloqueada/NAT) → recomeça. */
+    private val retryIce = Runnable {
+        onStatus("ICE não conectou em 30 s (rede diferente/bloqueada?); tentando de novo…")
+        negotiate(force = true)
+    }
 
     private fun negotiate(force: Boolean = false) {
         if (disposed) return
         if (!force && pc?.connectionState() == PeerConnection.PeerConnectionState.CONNECTED) return
-        main.removeCallbacks(retryNegotiation)
+        main.removeCallbacks(retryNoAnswer)
+        main.removeCallbacks(retryIce)
         closePc()
+        offerSent = false
+        queuedCandidates.clear()
         val f = factory ?: return
 
         val config = PeerConnection.RTCConfiguration(iceServers).apply {
@@ -171,29 +188,38 @@ class RtcClient(
 
         connection.createOffer(object : SdpAdapter() {
             override fun onCreateSuccess(desc: SessionDescription) {
-                val munged = SessionDescription(desc.type, preferH264(desc.description))
+                val munged = if (PREFER_H264) SessionDescription(desc.type, preferH264(desc.description)) else desc
                 connection.setLocalDescription(object : SdpAdapter() {
                     override fun onSetSuccess() {
                         val payload = JSONObject().put("type", "offer").put("sdp", munged.description)
-                        main.post { signaling?.send("OFFER", roomId, payload) }
+                        main.post {
+                            signaling?.send("OFFER", roomId, payload)
+                            offerSent = true
+                            onStatus("Oferta enviada; aguardando o navegador (sala $roomId)…")
+                            queuedCandidates.forEach { signaling?.send("CANDIDATE", roomId, it) }
+                            queuedCandidates.clear()
+                        }
                     }
                 }, munged)
             }
         }, MediaConstraints())
 
-        onStatus("Aguardando o navegador (sala $roomId)…")
-        // Se ninguém responder, tenta de novo (o site pode ainda não estar aberto).
-        main.postDelayed(retryNegotiation, 8000)
+        main.postDelayed(retryNoAnswer, 10_000)
+        main.postDelayed(retryIce, 30_000)
     }
 
     private fun onSignal(type: String, src: String?, payload: JSONObject?) {
         if (disposed || src != roomId || payload == null) return
         val connection = pc ?: return
         when (type) {
-            "ANSWER" -> connection.setRemoteDescription(
-                SdpAdapter(),
-                SessionDescription(SessionDescription.Type.ANSWER, payload.optString("sdp"))
-            )
+            "ANSWER" -> {
+                main.removeCallbacks(retryNoAnswer)
+                onStatus("Resposta recebida; negociando a rede (ICE)…")
+                connection.setRemoteDescription(
+                    SdpAdapter(),
+                    SessionDescription(SessionDescription.Type.ANSWER, payload.optString("sdp"))
+                )
+            }
             "CANDIDATE" -> connection.addIceCandidate(
                 IceCandidate(
                     payload.optString("sdpMid"),
@@ -214,6 +240,11 @@ class RtcClient(
     }
 
     /** Coloca H.264 na frente na linha m=video (preferência da especificação; o navegador decide). */
+    private companion object {
+        /** H.264 por hardware pode dar tela preta em alguns aparelhos; VP8 é o padrão seguro. */
+        const val PREFER_H264 = false
+    }
+
     private fun preferH264(sdp: String): String {
         val lines = sdp.split("\r\n").toMutableList()
         val m = lines.indexOfFirst { it.startsWith("m=video") }
@@ -232,7 +263,13 @@ class RtcClient(
         override fun onIceCandidate(c: IceCandidate) {
             val payload = JSONObject()
                 .put("candidate", c.sdp).put("sdpMid", c.sdpMid).put("sdpMLineIndex", c.sdpMLineIndex)
-            main.post { signaling?.send("CANDIDATE", roomId, payload) }
+            main.post {
+                if (offerSent) signaling?.send("CANDIDATE", roomId, payload) else queuedCandidates.add(payload)
+            }
+        }
+
+        override fun onIceConnectionChange(s: PeerConnection.IceConnectionState) {
+            main.post { if (!disposed) onStatus("ICE: ${s.name.lowercase()}") }
         }
 
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
@@ -240,18 +277,20 @@ class RtcClient(
                 if (disposed) return@post
                 when (state) {
                     PeerConnection.PeerConnectionState.CONNECTED -> {
-                        main.removeCallbacks(retryNegotiation)
-                        onStatus("Conectado ao navegador")
+                        main.removeCallbacks(retryNoAnswer)
+                        main.removeCallbacks(retryIce)
+                        onStatus("Conectado ao navegador ✔")
                     }
                     PeerConnection.PeerConnectionState.DISCONNECTED -> {
                         onStatus("Conexão instável…")
-                        main.postDelayed(retryNegotiation, 4000)
+                        main.removeCallbacks(retryIce)
+                        main.postDelayed(retryIce, 8000)
                     }
                     PeerConnection.PeerConnectionState.FAILED,
                     PeerConnection.PeerConnectionState.CLOSED -> {
                         onStatus("Conexão perdida; reconectando…")
-                        main.removeCallbacks(retryNegotiation)
-                        main.postDelayed(retryNegotiation, 1000)
+                        main.removeCallbacks(retryIce)
+                        main.postDelayed({ negotiate(force = true) }, 1000)
                     }
                     else -> {}
                 }
@@ -259,7 +298,6 @@ class RtcClient(
         }
 
         override fun onSignalingChange(s: PeerConnection.SignalingState) {}
-        override fun onIceConnectionChange(s: PeerConnection.IceConnectionState) {}
         override fun onIceConnectionReceivingChange(b: Boolean) {}
         override fun onIceGatheringChange(s: PeerConnection.IceGatheringState) {}
         override fun onIceCandidatesRemoved(c: Array<out IceCandidate>) {}
