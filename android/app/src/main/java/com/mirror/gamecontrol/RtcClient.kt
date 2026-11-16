@@ -57,9 +57,24 @@ class RtcClient(
     private var lastFrameCount = -1L
     private val queuedCandidates = mutableListOf<JSONObject>()
 
+    // STUN + TURN. O TURN (Open Relay, só para teste) retransmite o tráfego já criptografado quando a conexão direta
+    // é bloqueada por firewall, isolamento de clientes do Wi-Fi, VPN ou CGNAT. Troque pelo seu em produção.
     private val iceServers = listOf(
         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+        PeerConnection.IceServer.builder(
+            listOf(
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turn:openrelay.metered.ca:443?transport=tcp",
+                "turns:openrelay.metered.ca:443?transport=tcp",
+            )
+        ).setUsername("openrelayproject").setPassword("openrelayproject").createIceServer(),
     )
+
+    /** Quantos candidatos locais de cada tipo (host/srflx/relay) esta conexão achou — vai no status. */
+    private val localTypes = HashMap<String, Int>()
+    private fun typesText() =
+        if (localTypes.isEmpty()) "nenhum candidato" else localTypes.entries.joinToString(" ") { "${it.key}=${it.value}" }
 
     // ---------------------------------------------------------------- ciclo de vida
 
@@ -192,7 +207,7 @@ class RtcClient(
 
     /** Respondeu mas o ICE não fechou em 30 s (rede bloqueada/NAT) → recomeça. */
     private val retryIce = Runnable {
-        onStatus("ICE não conectou em 30 s (rede diferente/bloqueada?); tentando de novo…")
+        onStatus("ICE não conectou em 45 s (firewall/rede bloqueando? ${typesText()}); tentando de novo…")
         negotiate(force = true)
     }
 
@@ -206,6 +221,7 @@ class RtcClient(
         closePc()
         offerSent = false
         queuedCandidates.clear()
+        localTypes.clear()
         val f = factory ?: return
 
         val config = PeerConnection.RTCConfiguration(iceServers).apply {
@@ -257,7 +273,7 @@ class RtcClient(
         }, MediaConstraints())
 
         main.postDelayed(retryNoAnswer, 10_000)
-        main.postDelayed(retryIce, 30_000)
+        main.postDelayed(retryIce, 45_000)
     }
 
     private fun onSignal(type: String, src: String?, payload: JSONObject?) {
@@ -338,6 +354,8 @@ class RtcClient(
         private val current get() = !disposed && gen == generation
 
         override fun onIceCandidate(c: IceCandidate) {
+            val type = Regex("""\btyp (\w+)""").find(c.sdp)?.groupValues?.get(1) ?: "?"
+            main.post { if (current) localTypes[type] = (localTypes[type] ?: 0) + 1 }
             val payload = JSONObject()
                 .put("candidate", c.sdp).put("sdpMid", c.sdpMid).put("sdpMLineIndex", c.sdpMLineIndex)
                 .put("sid", gen)
@@ -348,7 +366,7 @@ class RtcClient(
         }
 
         override fun onIceConnectionChange(s: PeerConnection.IceConnectionState) {
-            main.post { if (current) onStatus("ICE: ${s.name.lowercase()}") }
+            main.post { if (current) onStatus("ICE: ${s.name.lowercase()} (${typesText()})") }
         }
 
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {

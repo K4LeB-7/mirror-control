@@ -14,17 +14,29 @@ type Listeners = {
   onStream: (s: MediaStream | null) => void;
 };
 
+// TURN público de teste (Open Relay, projeto Metered): retransmite o tráfego JÁ CRIPTOGRAFADO (DTLS-SRTP) quando a
+// conexão direta é bloqueada (firewall, isolamento de clientes do Wi-Fi, VPN, 4G/CGNAT). Para uso sério, defina o seu
+// próprio TURN em NEXT_PUBLIC_TURN_URL (várias URLs separadas por vírgula), NEXT_PUBLIC_TURN_USER e NEXT_PUBLIC_TURN_PASS.
+const DEFAULT_TURN = [
+  "turn:openrelay.metered.ca:80",
+  "turn:openrelay.metered.ca:443",
+  "turn:openrelay.metered.ca:443?transport=tcp",
+  "turns:openrelay.metered.ca:443?transport=tcp",
+];
+
 function iceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
-  const url = process.env.NEXT_PUBLIC_TURN_URL;
-  if (url) {
-    servers.push({
-      urls: url,
-      username: process.env.NEXT_PUBLIC_TURN_USER,
-      credential: process.env.NEXT_PUBLIC_TURN_PASS,
-    });
-  }
+  const custom = process.env.NEXT_PUBLIC_TURN_URL;
+  servers.push({
+    urls: custom ? custom.split(",").map((u) => u.trim()) : DEFAULT_TURN,
+    username: custom ? process.env.NEXT_PUBLIC_TURN_USER : "openrelayproject",
+    credential: custom ? process.env.NEXT_PUBLIC_TURN_PASS : "openrelayproject",
+  });
   return servers;
+}
+
+function candType(c: string): string {
+  return /\btyp (\w+)/.exec(c)?.[1] ?? "?";
 }
 
 /**
@@ -36,6 +48,8 @@ export class RemoteSession {
   private pc: RTCPeerConnection | null = null;
   private peerId: string | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  private remoteCounts: Record<string, number> | null = null;
+  private dumpStats: (() => Promise<void>) | null = null;
   /** Candidatos que chegaram antes da OFFER do mesmo celular (src → lista). */
   private earlyCandidates = new Map<string, RTCIceCandidateInit[]>();
   /** "sid" da oferta atual (app >= 0.1.4); devolvido no ANSWER/CANDIDATE. */
@@ -130,6 +144,10 @@ export class RemoteSession {
   private async addCandidate(pc: RTCPeerConnection, c: RTCIceCandidateInit) {
     try {
       await pc.addIceCandidate(c);
+      if (c.candidate && this.remoteCounts) {
+        const t = candType(c.candidate);
+        this.remoteCounts[t] = (this.remoteCounts[t] ?? 0) + 1;
+      }
     } catch (e) {
       console.warn("addIceCandidate falhou", e);
     }
@@ -153,8 +171,38 @@ export class RemoteSession {
     this.pc = pc;
 
     const sid = this.offerSid;
+    const local: Record<string, number> = {};
+    const remote: Record<string, number> = {};
+    this.remoteCounts = remote;
+    const fmt = (o: Record<string, number>) => Object.entries(o).map(([k, v]) => `${k}=${v}`).join(" ") || "nenhum";
+    pc.onicegatheringstatechange = () => {
+      if (this.pc === pc && pc.iceGatheringState === "complete") this.note(`Candidatos locais: ${fmt(local)}`);
+    };
+    pc.onicecandidateerror = (e) => {
+      const ev = e as RTCPeerConnectionIceErrorEvent;
+      if (this.pc === pc) this.note(`Erro ICE ${ev.errorCode}: ${ev.errorText} (${ev.url})`);
+    };
+    // Mostra por que não conectou: estado dos pares de candidatos depois de 12 s e ao falhar.
+    const dump = async () => {
+      if (this.pc !== pc || pc.connectionState === "connected") return;
+      try {
+        const stats = await pc.getStats();
+        const byId = new Map<string, any>();
+        stats.forEach((r) => byId.set(r.id, r));
+        const pairs: string[] = [];
+        stats.forEach((r: any) => {
+          if (r.type !== "candidate-pair") return;
+          const l = byId.get(r.localCandidateId), rm = byId.get(r.remoteCandidateId);
+          pairs.push(`${l?.candidateType ?? "?"}→${rm?.candidateType ?? "?"}:${r.state}`);
+        });
+        this.note(`Pares de candidatos: ${pairs.length ? pairs.join(", ") : "nenhum"}; remotos: ${fmt(remote)}`);
+      } catch {}
+    };
+    setTimeout(dump, 12000);
+    this.dumpStats = dump;
     pc.onicecandidate = (ev) => {
       if (this.pc !== pc || !ev.candidate || !ev.candidate.candidate) return;
+      local[candType(ev.candidate.candidate)] = (local[candType(ev.candidate.candidate)] ?? 0) + 1;
       this.signaling.send("CANDIDATE", src, sid === undefined ? ev.candidate.toJSON() : { ...ev.candidate.toJSON(), sid });
     };
     pc.ontrack = (ev) => {
@@ -183,6 +231,7 @@ export class RemoteSession {
       if (this.pc !== pc) return;
       const s = pc.connectionState;
       this.note(`Conexão: ${s}`);
+      if (s === "failed") void this.dumpStats?.();
       if (s === "connected") this.patch({ peer: "connected" });
       else if (s === "disconnected") this.patch({ peer: "disconnected" });
       else if (s === "failed" || s === "closed") {

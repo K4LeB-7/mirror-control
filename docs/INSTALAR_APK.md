@@ -41,3 +41,16 @@ O link de download acima já serve a versão nova após o push.
   devem estar na **mesma rede Wi-Fi** (sem "isolamento de clientes"/rede de convidados); em redes diferentes é preciso um
   servidor TURN. Use o ID mostrado no site (um ID antigo não conecta).
 - **Mapear teclas sem o celular:** botão **Mapear teclas e mouse** na tela inicial do site.
+
+## Se ficar em "conectando" (firewall / rede)
+O app e o site usam conexão direta (WebRTC/UDP) e, se ela for bloqueada, um servidor **TURN** de retransmissão
+(por padrão o público Open Relay, só para teste; o tráfego segue criptografado). Para a conexão direta (mais rápida):
+- Celular e notebook no **mesmo Wi-Fi**, sem rede de convidados nem "isolamento de clientes/AP isolation" no roteador;
+- Desligue VPN no notebook e no celular; no Xiaomi, desligue "Wi-Fi+ dados móveis";
+- No Windows, a rede deve estar como **Privada** e o Chrome/Edge permitido no Firewall (Segurança do Windows →
+  Firewall → Permitir um aplicativo), ou como administrador:
+  `netsh advfirewall firewall add rule name="Chrome WebRTC" dir=in action=allow program="C:\Program Files\Google\Chrome\Application\chrome.exe" protocol=UDP profile=any`
+- Extensões que "bloqueiam vazamento de WebRTC" (uBlock/Privacy) impedem a conexão direta: desative-as neste site.
+O painel **Diagnóstico da conexão** do site e o status do app mostram quantos candidatos de rede (host/srflx/relay)
+foram achados; `relay=0` indica que o TURN não está acessível (rede bloqueando a porta 443/80).
+Para uso sério, configure o seu TURN: variáveis `NEXT_PUBLIC_TURN_URL`, `NEXT_PUBLIC_TURN_USER`, `NEXT_PUBLIC_TURN_PASS` na Vercel.
