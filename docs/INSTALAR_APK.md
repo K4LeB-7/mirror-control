@@ -66,3 +66,7 @@ Para uso sério, configure o seu TURN: variáveis `NEXT_PUBLIC_TURN_URL`, `NEXT_
    (candidatos `host` 192.168.42.x no Diagnóstico).
 O tethering usa a internet do celular para o PC se o PC não tiver outra; para o espelhamento só é preciso o cabo
 (a sinalização usa a internet de qualquer dos dois lados).
+
+## IDs diferentes entre site e app
+O site e o app precisam usar o **mesmo ID de sala**. No site há o campo "ID que já está no app" (botão **Usar este ID**),
+e também dá para abrir `https://mirror-control.vercel.app/?room=SEU_ID`. No app, **Escanear QR** preenche o ID certo.

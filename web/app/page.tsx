@@ -36,8 +36,11 @@ export default function Page() {
   // Sala estável entre recarregamentos (o QR continua válido).
   useEffect(() => {
     let id = "";
+    const fromUrl = new URLSearchParams(window.location.search).get("room")?.trim().toLowerCase();
+    if (fromUrl && /^[a-z0-9]{6,32}$/.test(fromUrl)) id = fromUrl;
     try {
-      id = localStorage.getItem(ROOM_KEY) || "";
+      if (!id) id = localStorage.getItem(ROOM_KEY) || "";
+      else localStorage.setItem(ROOM_KEY, id);
     } catch {}
     if (!id) {
       id = newRoomId();
@@ -96,8 +99,8 @@ export default function Page() {
 
   const changeQuality = (height: number, fps: number) => setQuality({ height, fps });
 
-  const newRoom = () => {
-    const id = newRoomId();
+  const newRoom = (given?: string) => {
+    const id = given ?? newRoomId();
     try {
       localStorage.setItem(ROOM_KEY, id);
     } catch {}
@@ -124,7 +127,8 @@ export default function Page() {
         height={quality.height}
         fps={quality.fps}
         onQuality={changeQuality}
-        onNewRoom={newRoom}
+        onNewRoom={() => newRoom()}
+        onSetRoom={(id) => newRoom(id)}
         onOpenMapper={() => {
           setAspect(20 / 9);
           setEditing(true);

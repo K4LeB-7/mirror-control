@@ -14,6 +14,8 @@ type Props = {
   onQuality: (height: number, fps: number) => void;
   onNewRoom: () => void;
   onOpenMapper: () => void;
+  /** Usa o ID digitado (por exemplo o que já está no app Android). */
+  onSetRoom: (id: string) => void;
 };
 
 const peerText: Record<SessionState["peer"], string> = {
@@ -24,8 +26,11 @@ const peerText: Record<SessionState["peer"], string> = {
   failed: "Conexão perdida. O app tentará reconectar.",
 };
 
-export default function ConnectPanel({ roomId, state, height, fps, onQuality, onNewRoom, onOpenMapper }: Props) {
+export default function ConnectPanel({ roomId, state, height, fps, onQuality, onNewRoom, onOpenMapper, onSetRoom }: Props) {
   const [qr, setQr] = useState("");
+  const [typed, setTyped] = useState("");
+  const typedId = typed.trim().toLowerCase();
+  const typedOk = /^[a-z0-9]{6,32}$/.test(typedId);
 
   useEffect(() => {
     QRCode.toDataURL(roomId, { margin: 1, width: 240 }).then(setQr).catch(() => setQr(""));
@@ -53,6 +58,24 @@ export default function ConnectPanel({ roomId, state, height, fps, onQuality, on
       <div className="text-center">
         <div className="text-xs uppercase tracking-wider text-zinc-500">ID da sala</div>
         <code className="select-all text-3xl font-mono tracking-widest">{roomId}</code>
+      </div>
+
+      <div className="flex w-full max-w-sm items-center gap-2 text-sm">
+        <input
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          placeholder="ID que já está no app (opcional)"
+          autoCapitalize="none"
+          spellCheck={false}
+          className="min-w-0 flex-1 rounded bg-zinc-800 px-2 py-1 font-mono"
+        />
+        <button
+          className="rounded bg-emerald-700 px-3 py-1 disabled:opacity-40"
+          disabled={!typedOk || typedId === roomId}
+          onClick={() => onSetRoom(typedId)}
+        >
+          Usar este ID
+        </button>
       </div>
 
       <div className="flex gap-4 text-sm">
