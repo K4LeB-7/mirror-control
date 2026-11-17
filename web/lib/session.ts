@@ -12,6 +12,8 @@ export type SessionState = {
 type Listeners = {
   onState: (s: SessionState) => void;
   onStream: (s: MediaStream | null) => void;
+  /** Mensagem JSON do celular no canal "ctrl" (app 0.3.0+: status de rotate/nav). */
+  onCtrl?: (text: string) => void;
 };
 
 // TURN público de teste (Open Relay, projeto Metered): retransmite o tráfego JÁ CRIPTOGRAFADO (DTLS-SRTP) quando a
@@ -85,11 +87,12 @@ export class RemoteSession {
     if (this.input?.readyState === "open") this.input.send(buf);
   }
 
+  /** Com o canal fechado só a qualidade fica guardada (é reenviada ao abrir); rotate/nav sem conexão não fazem sentido. */
   sendCtrl(msg: CtrlMessage) {
     if (this.ctrl?.readyState === "open") {
       this.ctrl.send(JSON.stringify(msg));
-      this.pendingCtrl = null;
-    } else {
+      if (msg.type === "quality") this.pendingCtrl = null;
+    } else if (msg.type === "quality") {
       this.pendingCtrl = msg;
     }
   }
@@ -220,6 +223,9 @@ export class RemoteSession {
       } else if (ev.channel.label === "ctrl") {
         const ch = ev.channel;
         this.ctrl = ch;
+        ch.onmessage = (m) => {
+          if (this.ctrl === ch && typeof m.data === "string") this.l.onCtrl?.(m.data);
+        };
         const flush = () => {
           if (this.ctrl === ch && this.pendingCtrl) this.sendCtrl(this.pendingCtrl);
         };

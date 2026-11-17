@@ -23,7 +23,11 @@ export type UsbSessionState = {
   info?: UsbInfo;
 };
 
-type Listeners = { onState: (s: UsbSessionState) => void };
+type Listeners = {
+  onState: (s: UsbSessionState) => void;
+  /** CTRL do celular (JSON; app 0.3.0+: status de rotate/nav). */
+  onCtrl?: (text: string) => void;
+};
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -221,8 +225,11 @@ export class UsbSession {
         if (FATAL[code]) return `${FATAL[code]} (${text})`;
         return "";
       }
+      case FrameType.CTRL:
+        this.l.onCtrl?.(decodeText(f.payload));
+        return undefined;
       default:
-        return undefined; // CTRL do celular / tipos futuros: ignorados
+        return undefined; // tipos futuros: ignorados
     }
   }
 

@@ -16,8 +16,9 @@ export type ActionType = (typeof Action)[keyof typeof Action];
 
 export const PACKET_SIZE = 18;
 
-/** Ponteiros reservados. Botões usam 1..8. */
+/** Ponteiros reservados: 0 joystick, 1..7 botões, 8 toque do mouse no modo livre (e rolagem), 9 câmera. */
 export const POINTER_JOYSTICK = 0;
+export const POINTER_MOUSE = 8;
 export const POINTER_LOOK = 9;
 
 const buffer = new ArrayBuffer(PACKET_SIZE);
@@ -42,7 +43,29 @@ export function encodePacket(
 }
 
 /**
- * Mensagens de controle (DataChannel "ctrl" no WebRTC; quadro CTRL no modo USB). JSON.
+ * Mensagens de controle navegador → celular (DataChannel "ctrl" no WebRTC; quadro CTRL no modo USB). JSON.
  * "keyframe" só é usada no modo USB (pede um quadro-chave ao encoder após perda/erro de decodificação).
+ * "rotate"/"nav" (app 0.3.0+): girar a tela e botões Voltar/Início/Recentes do Android.
  */
-export type CtrlMessage = { type: "quality"; height: number; fps: number } | { type: "keyframe" };
+export type RotateMode = "portrait" | "landscape" | "auto";
+export type NavAction = "back" | "home" | "recents";
+export type CtrlMessage =
+  | { type: "quality"; height: number; fps: number }
+  | { type: "keyframe" }
+  | { type: "rotate"; mode: RotateMode }
+  | { type: "nav"; action: NavAction };
+
+/**
+ * Celular → navegador (app 0.3.0+): resultado de rotate/nav, ex.:
+ * {"type":"status","scope":"rotate","ok":false,"text":"Ative o serviço de acessibilidade…"}.
+ */
+export type PhoneStatus = { type: "status"; scope: string; ok: boolean; text: string };
+
+export function parsePhoneCtrl(text: string): PhoneStatus | null {
+  try {
+    const j = JSON.parse(text);
+    if (j && j.type === "status" && typeof j.text === "string")
+      return { type: "status", scope: String(j.scope ?? ""), ok: j.ok !== false, text: j.text.slice(0, 300) };
+  } catch {}
+  return null;
+}

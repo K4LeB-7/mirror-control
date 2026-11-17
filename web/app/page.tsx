@@ -1,15 +1,44 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ConnectPanel from "@/components/ConnectPanel";
-import MapperOverlay from "@/components/MapperOverlay";
+import ControlsOverlay from "@/components/ControlsOverlay";
+import MapperPanel, { CaptureTarget, Placing } from "@/components/MapperPanel";
+import Toolbar from "@/components/Toolbar";
 import UsbPanel from "@/components/UsbPanel";
-import { InputController } from "@/lib/inputController";
-import { DEFAULT_LAYOUT, Layout, loadLayout, saveLayout } from "@/lib/layout";
+import { InputController, InputSink } from "@/lib/inputController";
+import {
+  Layout,
+  clamp01,
+  defaultLayout,
+  fitContain,
+  keyBind,
+  mouseBind,
+  orientationFor,
+  toNormalized,
+  wheelBind,
+} from "@/lib/layout";
+import { INITIAL_MODE, ModeEvent, ModeState, isEditableTarget, nextMode } from "@/lib/mouseModes";
+import {
+  ProfileStore,
+  UiSettings,
+  DEFAULT_SETTINGS,
+  activeProfile,
+  addButton,
+  defaultStore,
+  loadSettings,
+  loadStore,
+  saveSettings,
+  saveStore,
+  updateLayout,
+} from "@/lib/profiles";
+import { CtrlMessage, NavAction, RotateMode, parsePhoneCtrl } from "@/lib/protocol";
 import { RemoteSession, SessionState } from "@/lib/session";
 import type { UsbSession, UsbSessionState } from "@/lib/usbSession";
 import { ChannelOpener, UsbConnectError, requestUsbDevice } from "@/lib/usbTransport";
 
 const ROOM_KEY = "mirror-control.room";
+/** Margem entre o vídeo e as bordas do palco (px). */
+const STAGE_PAD = 8;
 
 function newRoomId() {
   const alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
@@ -17,14 +46,20 @@ function newRoomId() {
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
 
+const storage = () => {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+};
+
 export default function Page() {
   const [roomId, setRoomId] = useState("");
   const [state, setState] = useState<SessionState>({ signaling: "connecting", peer: "waiting", log: [] });
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT);
-  const [editing, setEditing] = useState(false);
+  const [videoReady, setVideoReady] = useState(false);
   const [preview, setPreview] = useState(false); // editor de teclas sem celular conectado
-  const [locked, setLocked] = useState(false);
   const [aspect, setAspect] = useState(16 / 9);
   const [quality, setQuality] = useState({ height: 720, fps: 60 });
   // Modo USB (ADB via WebUSB). Em modo USB a sessão WebRTC fica fechada (um modo por vez, como no app).
@@ -35,16 +70,37 @@ export default function Page() {
   const [usbNote, setUsbNote] = useState<string | undefined>();
   const [usbBusy, setUsbBusy] = useState(false);
 
+  // Mapeamento, preferências e modos do mouse.
+  const [store, setStore] = useState<ProfileStore>(defaultStore);
+  const [settings, setSettings] = useState<UiSettings>(DEFAULT_SETTINGS);
+  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [capture, setCapture] = useState<CaptureTarget | null>(null);
+  const [placing, setPlacing] = useState<Placing | null>(null);
+  const [modeState, setModeState] = useState<ModeState>(INITIAL_MODE);
+  const [rotation, setRotation] = useState<RotateMode | null>(null);
+  const [notice, setNotice] = useState<{ text: string; ok: boolean; at: number } | null>(null);
+  const [stage, setStage] = useState({ w: 0, h: 0 });
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<HTMLElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<RemoteSession | null>(null);
-  const layoutRef = useRef(layout);
-  const aspectRef = useRef(aspect);
-  const lockedRef = useRef(false);
-  layoutRef.current = layout;
-  aspectRef.current = aspect;
+  const sinkRef = useRef<(InputSink & { sendCtrl(m: CtrlMessage): void }) | null>(null);
+  const inputRef = useRef<InputController | null>(null);
+  const autoOpened = useRef(new Set<string>());
 
-  // Sala estável entre recarregamentos (o QR continua válido).
+  const orientation = orientationFor(aspect);
+  const profile = activeProfile(store);
+  const layout = profile[orientation];
+
+  // Refs lidos pelos listeners (o InputController vive fora do ciclo do React).
+  const r = useRef({ layout, aspect, settings, mode: modeState, editing, capture, placing, orientation });
+  r.current = { layout, aspect, settings, mode: modeState, editing, capture, placing, orientation };
+  const modeRef = useRef<ModeState>(INITIAL_MODE);
+
+  // Sala estável entre recarregamentos (o QR continua válido) + perfis/preferências salvos.
   useEffect(() => {
     let id = "";
     const fromUrl = new URLSearchParams(window.location.search).get("room")?.trim().toLowerCase();
@@ -60,61 +116,208 @@ export default function Page() {
       } catch {}
     }
     setRoomId(id);
-    setLayout(loadLayout());
+    const loaded = loadStore(storage());
+    saveStore(storage(), loaded); // grava já a migração do formato antigo / o perfil padrão
+    setStore(loaded);
+    setSettings(loadSettings(storage()));
+  }, []);
+
+  const notify = useCallback((text: string, ok = true) => setNotice({ text, ok, at: Date.now() }), []);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice((n) => (n === notice ? null : n)), 9000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  const onPhoneCtrl = useCallback(
+    (text: string) => {
+      const s = parsePhoneCtrl(text);
+      if (s) notify(s.text, s.ok);
+    },
+    [notify]
+  );
+
+  // ---------------------------------------------------------------- modos do mouse
+
+  const surface = () => (mode === "usb" ? canvasRef.current : videoRef.current);
+  const surfaceRef = useRef(surface);
+  surfaceRef.current = surface;
+
+  const requestLock = useCallback(() => {
+    const el = surfaceRef.current();
+    if (!el) {
+      dispatchRef.current("lockError");
+      return;
+    }
+    const fail = () => {
+      dispatchRef.current("lockError");
+      notify("O navegador não travou o mouse. Clique na página e tente de novo (após o Esc o Chrome pede ~1 s).", false);
+    };
+    try {
+      // @ts-expect-error unadjustedMovement é suportado no Chromium (mouse sem aceleração)
+      const p = el.requestPointerLock({ unadjustedMovement: true }) as Promise<void> | undefined;
+      p?.catch?.(() => {
+        try {
+          const p2 = el.requestPointerLock() as unknown as Promise<void> | undefined;
+          p2?.catch?.(fail);
+        } catch {
+          fail();
+        }
+      });
+    } catch {
+      fail();
+    }
+  }, [notify]);
+
+  const dispatchMode = useCallback(
+    (ev: ModeEvent) => {
+      const res = nextMode(modeRef.current, ev);
+      modeRef.current = res.state;
+      setModeState(res.state);
+      for (const eff of res.effects) {
+        if (eff === "releaseAll") inputRef.current?.releaseAll();
+        else if (eff === "exitLock") {
+          if (document.pointerLockElement) document.exitPointerLock();
+        } else if (eff === "requestLock") requestLock();
+      }
+    },
+    [requestLock]
+  );
+  const dispatchRef = useRef(dispatchMode);
+  dispatchRef.current = dispatchMode;
+
+  // ---------------------------------------------------------------- perfis
+
+  const commitStore = useCallback((f: (s: ProfileStore) => ProfileStore) => {
+    setStore((s) => {
+      const n = f(s);
+      if (n !== s) saveStore(storage(), n);
+      return n;
+    });
+  }, []);
+
+  /** Edita o layout da orientação atual (marca como personalizado: o mapeador não abre mais sozinho). */
+  const editLayout = useCallback(
+    (f: (l: Layout) => Layout) => commitStore((s) => updateLayout(s, r.current.orientation, (l) => ({ ...f(l), confirmed: true }))),
+    [commitStore]
+  );
+
+  const commitSettings = useCallback((s: UiSettings) => {
+    setSettings(s);
+    saveSettings(storage(), s);
+  }, []);
+
+  const closeEditor = useCallback(() => {
+    if (!r.current.editing) return;
+    // Ref atualizado já: uma tecla no mesmo evento (ex.: logo após travar o mouse) não pode cair no editor.
+    r.current = { ...r.current, editing: false, capture: null, placing: null };
+    setEditing(false);
+    setSelected(null);
+    setCapture(null);
+    setPlacing(null);
+    if (!r.current.layout.confirmed) editLayout((l) => l);
+  }, [editLayout]);
+
+  const openEditor = useCallback(() => {
+    if (modeRef.current.mode === "locked") dispatchMode("escape");
+    inputRef.current?.releaseAll();
+    r.current = { ...r.current, editing: true };
+    setEditing(true);
+  }, [dispatchMode]);
+
+  // ---------------------------------------------------------------- entrada
+
+  const pointAt = useCallback((e: MouseEvent, clampIt: boolean) => {
+    const box = boxRef.current;
+    if (!box) return null;
+    if (!clampIt) {
+      const t = e.target;
+      if (!(t instanceof Node) || !box.contains(t)) return null; // barra, painel, faixa fora do vídeo
+      if (r.current.editing && t instanceof Element && t.closest("[data-control]")) return null; // editando um controle
+    }
+    const b = box.getBoundingClientRect();
+    const c = fitContain(b.width, b.height, r.current.aspect);
+    return toNormalized({ ...c, left: b.left + c.left, top: b.top + c.top }, e.clientX, e.clientY, clampIt, 1);
+  }, []);
+
+  const makeInput = useCallback(
+    (sink: InputSink & { sendCtrl(m: CtrlMessage): void }) => {
+      modeRef.current = INITIAL_MODE;
+      setModeState(INITIAL_MODE);
+      sinkRef.current = sink;
+      const input = new InputController(sink, {
+        getLayout: () => r.current.layout,
+        getAspect: () => r.current.aspect,
+        getMode: () => modeRef.current.mode,
+        getSettings: () => r.current.settings,
+        keysSuspended: () => r.current.editing || !!r.current.capture,
+        mouseSuspended: () => !!r.current.capture || !!r.current.placing,
+        pointAt,
+        onToggleMode: () => {
+          if (modeRef.current.mode !== "locked" && r.current.editing) closeEditorRef.current();
+          dispatchRef.current("toggle");
+        },
+        onEscape: () => dispatchRef.current("escape"),
+      });
+      inputRef.current = input;
+      input.attach();
+      return input;
+    },
+    [pointAt]
+  );
+  const closeEditorRef = useRef(closeEditor);
+  closeEditorRef.current = closeEditor;
+
+  // Pointer Lock: o navegador decide (Esc solta sempre). Nunca travamos de novo sozinhos.
+  useEffect(() => {
+    const onChange = () => {
+      const el = document.pointerLockElement;
+      if (el && stageRef.current?.contains(el)) {
+        if (modeRef.current.mode !== "locked") {
+          closeEditorRef.current();
+          dispatchRef.current("lockAcquired");
+        }
+      } else if (modeRef.current.mode === "locked" || modeRef.current.requesting) {
+        dispatchRef.current("lockLost");
+      }
+    };
+    const onError = () => dispatchRef.current("lockError");
+    document.addEventListener("pointerlockchange", onChange);
+    document.addEventListener("pointerlockerror", onError);
+    return () => {
+      document.removeEventListener("pointerlockchange", onChange);
+      document.removeEventListener("pointerlockerror", onError);
+    };
   }, []);
 
   // Sessão WebRTC + controlador de entrada.
   useEffect(() => {
     if (!roomId || mode !== "webrtc") return;
-    const session = new RemoteSession(roomId, { onState: setState, onStream: setStream });
+    const session = new RemoteSession(roomId, { onState: setState, onStream: setStream, onCtrl: onPhoneCtrl });
     sessionRef.current = session;
-    const input = new InputController(
-      session,
-      () => layoutRef.current,
-      () => aspectRef.current,
-      () => lockedRef.current
-    );
-    input.attach();
-    const onLockChange = () => {
-      const isLocked = document.pointerLockElement === videoRef.current && !!videoRef.current;
-      lockedRef.current = isLocked;
-      setLocked(isLocked);
-      if (!isLocked) input.releaseAll();
-    };
-    document.addEventListener("pointerlockchange", onLockChange);
+    const input = makeInput(session);
     return () => {
-      document.removeEventListener("pointerlockchange", onLockChange);
       input.detach();
+      inputRef.current = null;
+      sinkRef.current = null;
       session.close();
       sessionRef.current = null;
     };
-  }, [roomId, mode]);
+  }, [roomId, mode, makeInput, onPhoneCtrl]);
 
   // Sessão USB: mesmo controlador de entrada, com o <canvas> como alvo do Pointer Lock.
   useEffect(() => {
     if (!usbSession) return;
-    const input = new InputController(
-      usbSession,
-      () => layoutRef.current,
-      () => aspectRef.current,
-      () => lockedRef.current
-    );
-    input.attach();
-    const onLockChange = () => {
-      const isLocked = !!canvasRef.current && document.pointerLockElement === canvasRef.current;
-      lockedRef.current = isLocked;
-      setLocked(isLocked);
-      if (!isLocked) input.releaseAll();
-    };
-    document.addEventListener("pointerlockchange", onLockChange);
+    const input = makeInput(usbSession);
     return () => {
-      document.removeEventListener("pointerlockchange", onLockChange);
       input.detach();
+      inputRef.current = null;
+      sinkRef.current = null;
       usbSession.close();
     };
-  }, [usbSession]);
+  }, [usbSession, makeInput]);
 
-  // Proporção do canvas = a do vídeo que o celular anunciou (INFO).
+  // Proporção do canvas = a do vídeo que o celular anunciou (INFO; muda ao girar).
   const usbInfo = usbState?.info;
   useEffect(() => {
     if (usbInfo) setAspect(usbInfo.width / usbInfo.height);
@@ -128,6 +331,7 @@ export default function Page() {
   useEffect(() => {
     const v = videoRef.current;
     if (v) v.srcObject = stream;
+    if (!stream) setVideoReady(false);
   }, [stream]);
 
   // Reenvia a qualidade quando o celular (re)conecta.
@@ -138,12 +342,163 @@ export default function Page() {
     }
   }, [state.peer, quality]);
 
-  const updateLayout = useCallback((l: Layout) => {
-    setLayout(l);
-    saveLayout(l);
-  }, []);
+  // Girou (retrato ↔ paisagem): os controles mudam de lugar → nenhum dedo pode ficar preso na posição antiga.
+  const lastOrientation = useRef(orientation);
+  useEffect(() => {
+    if (lastOrientation.current === orientation) return;
+    lastOrientation.current = orientation;
+    inputRef.current?.releaseAll();
+    setPlacing(null);
+  }, [orientation]);
+
+  // Palco medido: o vídeo ocupa o maior retângulo possível ("contain") e os controles escalam com ele.
+  const usbMode = mode === "usb" && !!usbState;
+  const showStage = (usbMode && !!usbState.info) || (!usbMode && (!!stream || preview));
+  useLayoutEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => setStage({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [showStage]);
+  const box = useMemo(() => {
+    const f = fitContain(Math.max(0, stage.w - 2 * STAGE_PAD), Math.max(0, stage.h - 2 * STAGE_PAD), aspect);
+    return { ...f, left: f.left + STAGE_PAD, top: f.top + STAGE_PAD };
+  }, [stage, aspect]);
+
+  // Mapeador abre sozinho no 1º uso (perfil/orientação ainda não personalizado), assim que o vídeo começa.
+  const videoActive = usbMode ? !!usbState.info : !!stream && videoReady;
+  useEffect(() => {
+    if (!videoActive || editing) return;
+    const key = `${profile.id}:${orientation}`;
+    if (layout.confirmed || autoOpened.current.has(key)) return;
+    autoOpened.current.add(key);
+    if (modeRef.current.mode === "locked") return; // jogando: não interrompe
+    setEditing(true);
+  }, [videoActive, editing, profile.id, orientation, layout.confirmed]);
+
+  // ---------------------------------------------------------------- editor: captura, posicionamento, teclado
+
+  const applyCapture = useCallback(
+    (t: CaptureTarget, bind: string) => {
+      if (t.kind === "btn") editLayout((l) => ({ ...l, buttons: l.buttons.map((b) => (b.id === t.id ? { ...b, bind } : b)) }));
+      else if (t.kind === "joy") editLayout((l) => ({ ...l, joystick: { ...l.joystick, [t.dir]: bind.slice(4) } }));
+      else commitSettings({ ...r.current.settings, toggleKey: bind.slice(4) });
+      setCapture(null);
+    },
+    [editLayout, commitSettings]
+  );
+
+  useEffect(() => {
+    if (!capture) return;
+    const keysOnly = capture.kind !== "btn";
+    const isCaptureButton = (e: Event) => e.target instanceof Element && !!e.target.closest('[data-testid^="capture-"]');
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (e.code === "Escape") return setCapture(null);
+      if (!e.code) return;
+      applyCapture(capture, keyBind(e.code));
+    };
+    const onMouse = (e: MouseEvent) => {
+      if (isCaptureButton(e)) return; // clicar de novo no botão cancela
+      if (keysOnly) return setCapture(null);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.button <= 2) applyCapture(capture, mouseBind(e.button));
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (keysOnly || e.deltaY === 0) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      applyCapture(capture, wheelBind(e.deltaY < 0 ? "up" : "down"));
+    };
+    const onContext = (e: Event) => e.preventDefault();
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("mousedown", onMouse, true);
+    window.addEventListener("wheel", onWheel, { capture: true, passive: false });
+    window.addEventListener("contextmenu", onContext, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("mousedown", onMouse, true);
+      window.removeEventListener("wheel", onWheel, true);
+      window.removeEventListener("contextmenu", onContext, true);
+    };
+  }, [capture, applyCapture]);
+
+  const moveControl = useCallback(
+    (id: string, x: number, y: number) =>
+      editLayout((l) => {
+        if (id === "joystick") return { ...l, joystick: { ...l.joystick, x, y } };
+        if (id === "look") return { ...l, look: { ...l.look, x, y } };
+        return { ...l, buttons: l.buttons.map((b) => (b.id === id ? { ...b, x, y } : b)) };
+      }),
+    [editLayout]
+  );
+
+  const onPlace = (x: number, y: number) => {
+    const pl = placing;
+    setPlacing(null);
+    if (!pl) return;
+    if (pl.kind === "move") return moveControl(pl.id, x, y);
+    const res = addButton(r.current.layout, x, y);
+    if (!res.id) return;
+    editLayout(() => res.layout);
+    setSelected(res.id);
+    setCapture({ kind: "btn", id: res.id }); // já pede a tecla do botão novo
+  };
+
+  // Setas movem o controle selecionado (Shift = passo maior); Delete apaga o botão; Esc cancela.
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (r.current.capture || isEditableTarget(e.target)) return;
+      if (e.code === "Escape") {
+        if (r.current.placing) setPlacing(null);
+        else setSelected(null);
+        return;
+      }
+      const id = selectedRef.current;
+      if (!id) return;
+      const step = e.shiftKey ? 0.02 : 0.004;
+      const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.code];
+      if (d) {
+        e.preventDefault();
+        const l = r.current.layout;
+        const cur = id === "joystick" ? l.joystick : id === "look" ? l.look : l.buttons.find((b) => b.id === id);
+        if (cur) moveControl(id, clamp01(cur.x + d[0]), clamp01(cur.y + d[1]));
+      } else if ((e.code === "Delete" || e.code === "Backspace") && id !== "joystick" && id !== "look") {
+        e.preventDefault();
+        editLayout((l) => ({ ...l, buttons: l.buttons.filter((b) => b.id !== id) }));
+        setSelected(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editing, moveControl, editLayout]);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
+  // ---------------------------------------------------------------- ações da barra
 
   const changeQuality = (height: number, fps: number) => setQuality({ height, fps });
+
+  const rotate = (m: RotateMode) => {
+    if (!usbMode && !stream) {
+      // Pré-visualização sem celular: só troca a proporção para editar o outro layout.
+      setAspect(m === "portrait" ? 9 / 20 : 20 / 9);
+      setRotation(m);
+      return;
+    }
+    sinkRef.current?.sendCtrl({ type: "rotate", mode: m });
+    setRotation(m);
+    notify(m === "auto" ? "Rotação automática pedida ao celular…" : `Pedido para girar em ${m === "portrait" ? "retrato" : "paisagem"}…`);
+  };
+
+  const nav = (a: NavAction) => sinkRef.current?.sendCtrl({ type: "nav", action: a });
 
   /** Clique em "Conectar por USB (ADB)": o seletor do WebUSB precisa ser aberto aqui, no gesto do usuário. */
   const connectUsb = async () => {
@@ -167,7 +522,7 @@ export default function Page() {
         opener = createAdbOpener(device);
       }
       const { UsbSession } = await import("@/lib/usbSession");
-      const s = new UsbSession(opener, usbPin, { onState: setUsbState });
+      const s = new UsbSession(opener, usbPin, { onState: setUsbState, onCtrl: onPhoneCtrl });
       if (document.pointerLockElement) document.exitPointerLock();
       setStream(null);
       setPreview(false);
@@ -188,6 +543,7 @@ export default function Page() {
     setUsbState(null);
     setEditing(false);
     setMode("webrtc");
+    setRotation(null);
     setState({ signaling: "connecting", peer: "waiting", log: [] });
   };
 
@@ -201,16 +557,8 @@ export default function Page() {
     setRoomId(id);
   };
 
-  const requestLock = () => {
-    if (editing) return;
-    const el: HTMLElement | null = mode === "usb" ? canvasRef.current : videoRef.current;
-    // @ts-expect-error unadjustedMovement é suportado no Chromium (mouse sem aceleração)
-    el?.requestPointerLock({ unadjustedMovement: true })?.catch?.(() => el?.requestPointerLock());
-  };
-
   if (!roomId) return null;
 
-  const usbMode = mode === "usb" && !!usbState;
   if (usbMode && !usbState.info) {
     return (
       <UsbPanel
@@ -248,105 +596,148 @@ export default function Page() {
     );
   }
 
+  const connected = usbMode ? usbState.peer === "connected" : !!stream && state.peer === "connected";
+  const canControl = usbMode ? connected : !!stream;
+  const connection = usbMode
+    ? connected
+      ? "USB conectado"
+      : "USB desconectado"
+    : stream
+      ? connected
+        ? "Wi-Fi conectado"
+        : "Wi-Fi instável"
+      : "Pré-visualização (sem celular)";
+  const warning = usbMode
+    ? usbState.peer !== "connected"
+      ? { text: usbState.peer === "failed" ? usbState.error ?? "USB desconectado" : "USB: reconectando…", testId: "usb-reconnecting" }
+      : undefined
+    : stream && state.peer !== "connected"
+      ? { text: "Reconectando…" }
+      : undefined;
+
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-black">
-      <div
-        className="relative"
-        style={{ aspectRatio: String(aspect), width: `min(100vw, calc(100vh * ${aspect}))` }}
-      >
-        {usbMode && (
-          <canvas
-            ref={(el) => {
-              canvasRef.current = el;
-              usbSession?.setCanvas(el);
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-black text-zinc-200">
+      <Toolbar
+        connection={connection}
+        connectionOk={connected || (!usbMode && !stream)}
+        warning={warning}
+        notice={notice ?? undefined}
+        mode={modeState.mode}
+        requesting={modeState.requesting}
+        toggleKey={settings.toggleKey}
+        onToggleMode={() => {
+          if (modeState.mode !== "locked" && editing) closeEditor();
+          dispatchMode("toggle");
+        }}
+        canControl={canControl}
+        rotation={rotation}
+        onRotate={rotate}
+        onNav={nav}
+        editing={editing}
+        onToggleEditor={() => (editing ? closeEditor() : openEditor())}
+        showControls={settings.showControls}
+        onShowControls={(v) => commitSettings({ ...settings, showControls: v })}
+        quality={quality}
+        onQuality={changeQuality}
+        exit={
+          usbMode
+            ? { label: "Sair do USB", onClick: leaveUsb }
+            : !stream
+              ? {
+                  label: "Sair da pré-visualização",
+                  onClick: () => {
+                    closeEditor();
+                    setPreview(false);
+                  },
+                }
+              : undefined
+        }
+      />
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <main ref={stageRef} data-testid="stage" className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-black">
+          <div
+            ref={boxRef}
+            data-testid="video-box"
+            className="absolute"
+            style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+          >
+            {usbMode && (
+              <canvas
+                ref={(el) => {
+                  canvasRef.current = el;
+                  usbSession?.setCanvas(el);
+                }}
+                data-testid="usb-canvas"
+                className="absolute inset-0 h-full w-full bg-black"
+              />
+            )}
+            {!stream && !usbMode && (
+              <div className="absolute inset-0 flex items-center justify-center bg-zinc-800 text-center text-sm text-zinc-400">
+                Pré-visualização (sem celular)
+                <br />
+                Retrato/Paisagem na barra trocam o layout editado
+              </div>
+            )}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              onResize={(e) => {
+                const v = e.currentTarget;
+                if (v.videoWidth && v.videoHeight) {
+                  setAspect(v.videoWidth / v.videoHeight);
+                  setVideoReady(true);
+                }
+              }}
+              onLoadedMetadata={(e) => {
+                const v = e.currentTarget;
+                if (v.videoWidth && v.videoHeight) {
+                  setAspect(v.videoWidth / v.videoHeight);
+                  setVideoReady(true);
+                }
+              }}
+              className={`absolute inset-0 h-full w-full object-contain ${stream && !usbMode ? "" : "hidden"}`}
+            />
+            <ControlsOverlay
+              layout={layout}
+              width={box.width}
+              height={box.height}
+              editing={editing}
+              show={settings.showControls}
+              opacity={settings.opacity}
+              locked={modeState.mode === "locked"}
+              selected={selected}
+              placing={!!placing}
+              onSelect={setSelected}
+              onMove={moveControl}
+              onPlace={onPlace}
+            />
+          </div>
+        </main>
+        {editing && (
+          <MapperPanel
+            store={store}
+            orientation={orientation}
+            layout={layout}
+            settings={settings}
+            selected={selected}
+            capture={capture}
+            placing={placing}
+            showGuide={!layout.confirmed}
+            onSelect={setSelected}
+            onCapture={setCapture}
+            onPlacing={setPlacing}
+            onStore={(s) => commitStore(() => s)}
+            onLayout={editLayout}
+            onSettings={commitSettings}
+            onReset={() => {
+              editLayout(() => defaultLayout(orientation));
+              setSelected(null);
             }}
-            data-testid="usb-canvas"
-            onClick={requestLock}
-            className="absolute inset-0 h-full w-full cursor-pointer bg-black"
+            onClose={closeEditor}
           />
         )}
-        {!stream && !usbMode && (
-          <div className="absolute inset-0 flex items-center justify-center bg-zinc-800 text-sm text-zinc-400">
-            Pré-visualização (sem celular conectado)
-          </div>
-        )}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          onClick={requestLock}
-          onResize={(e) => {
-            const v = e.currentTarget;
-            if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight);
-          }}
-          onLoadedMetadata={(e) => {
-            const v = e.currentTarget;
-            if (v.videoWidth && v.videoHeight) setAspect(v.videoWidth / v.videoHeight);
-          }}
-          className={`absolute inset-0 h-full w-full cursor-pointer ${stream && !usbMode ? "" : "hidden"}`}
-        />
-        <MapperOverlay layout={layout} editing={editing} onChange={updateLayout} />
-
-        <div className="absolute right-2 top-2 flex items-center gap-2 text-xs">
-          {!locked && !editing && (
-            <span className="rounded bg-black/70 px-2 py-1">Clique no vídeo para capturar o mouse (ESC solta)</span>
-          )}
-          {stream && !usbMode && state.peer !== "connected" && (
-            <span className="rounded bg-amber-700 px-2 py-1">Reconectando…</span>
-          )}
-          {usbMode && usbState.peer !== "connected" && (
-            <span data-testid="usb-reconnecting" className="max-w-xs rounded bg-amber-700 px-2 py-1">
-              {usbState.peer === "failed" ? usbState.error ?? "USB desconectado" : "USB: reconectando…"}
-            </span>
-          )}
-          {usbMode && (
-            <button className="rounded bg-black/70 px-2 py-1 hover:bg-black" onClick={leaveUsb}>
-              Sair do USB
-            </button>
-          )}
-          <button
-            className="rounded bg-black/70 px-2 py-1 hover:bg-black"
-            onClick={() => {
-              if (document.pointerLockElement) document.exitPointerLock();
-              setEditing((v) => !v);
-            }}
-          >
-            {editing ? "Concluir" : "Mapear teclas"}
-          </button>
-          {preview && !stream && (
-            <button
-              className="rounded bg-black/70 px-2 py-1 hover:bg-black"
-              onClick={() => {
-                setEditing(false);
-                setPreview(false);
-              }}
-            >
-              Voltar
-            </button>
-          )}
-          {editing && (
-            <button className="rounded bg-black/70 px-2 py-1" onClick={() => updateLayout(structuredClone(DEFAULT_LAYOUT))}>
-              Restaurar
-            </button>
-          )}
-          <select
-            className="rounded bg-black/70 p-1"
-            value={`${quality.height}p${quality.fps}`}
-            onChange={(e) => {
-              const m = /(\d+)p(\d+)/.exec(e.target.value)!;
-              changeQuality(Number(m[1]), Number(m[2]));
-            }}
-          >
-            {[720, 1080].flatMap((h) =>
-              [30, 60].map((f) => (
-                <option key={`${h}${f}`} value={`${h}p${f}`}>
-                  {h}p {f}fps
-                </option>
-              ))
-            )}
-          </select>
-        </div>
       </div>
     </div>
   );
