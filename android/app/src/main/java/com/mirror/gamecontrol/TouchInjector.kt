@@ -40,6 +40,17 @@ class TouchInjector(
         wakeAt = Long.MAX_VALUE
         pump()
     }
+    /**
+     * Callback que nunca chega (serviço desconectando, tela apagando, ROM que perde o callback) deixaria o
+     * planejador "em voo" para sempre e nenhum toque sairia mais: depois do prazo, conta como cancelado.
+     */
+    private val watchdog = Runnable {
+        if (current == null) return@Runnable
+        Log.w(TAG, "gesture sem resposta do sistema; tratando como cancelado")
+        current = null
+        planner.cancelled(now())
+        pump()
+    }
     private val lookIdle = Runnable {
         planner.up(LOOK_POINTER, now())
         pump()
@@ -48,6 +59,7 @@ class TouchInjector(
     private val callback = object : AccessibilityService.GestureResultCallback() {
         override fun onCompleted(g: GestureDescription?) {
             if (g !== current) return
+            handler.removeCallbacks(watchdog)
             current = null
             planner.completed(now())
             pump()
@@ -55,6 +67,7 @@ class TouchInjector(
 
         override fun onCancelled(g: GestureDescription?) {
             if (g !== current) return
+            handler.removeCallbacks(watchdog)
             current = null
             planner.cancelled(now())
             pump()
@@ -86,7 +99,7 @@ class TouchInjector(
         }
     }
 
-    /** Nova conexão (WebRTC/USB): solta tudo e zera gerações e deadman. */
+    /** Nova conexão (WebRTC/USB): solta tudo e zera as gerações (o deadman só vale para gen > 0). */
     fun newSession() {
         if (closed) return
         handler.post {
@@ -186,6 +199,9 @@ class TouchInjector(
             current = null
             planner.dispatchFailed()
             strokes.fill(null)
+        } else {
+            handler.removeCallbacks(watchdog)
+            handler.postDelayed(watchdog, g.durationMs + WATCHDOG_SLACK_MS)
         }
     }
 
@@ -235,6 +251,7 @@ class TouchInjector(
         private const val LOOK_IDLE_MS = 150L
         private const val LOOK_ZONE = 0.22f
         private const val SCREEN_TTL_MS = 500L
+        private const val WATCHDOG_SLACK_MS = 1_000L
         const val MIN_DEADMAN_MS = 200L
         const val MAX_DEADMAN_MS = 5_000L
 

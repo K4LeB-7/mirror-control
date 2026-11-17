@@ -25,8 +25,10 @@ export type UsbSessionState = {
 
 type Listeners = {
   onState: (s: UsbSessionState) => void;
-  /** CTRL do celular (JSON; app 0.3.0+: status de rotate/nav). */
+  /** CTRL do celular (JSON; app 0.3.0+: status de rotate/nav; 0.3.1+: caps). */
   onCtrl?: (text: string) => void;
+  /** Conexão nova (antes do HELLO e do "caps" do celular). */
+  onConnect?: () => void;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -75,6 +77,11 @@ export class UsbSession {
 
   get inputReady() {
     return this.state.peer === "connected";
+  }
+
+  /** Escritas pendentes no USB: MOVE/LOOK esperam o próximo quadro em vez de enfileirar. */
+  congested() {
+    return this.pendingWrites > 8;
   }
 
   /** O mesmo pacote de 18 bytes do WebRTC, num quadro INPUT. MOVE/LOOK podem ser descartados se o USB engasgar. */
@@ -165,6 +172,7 @@ export class UsbSession {
   /** Atende uma conexão até ela cair. Devolve a mensagem de erro se não for para reconectar. */
   private async serve(ch: ByteChannel): Promise<string | undefined> {
     this.note("Conectado ao app pelo ADB; enviando o PIN…");
+    this.l.onConnect?.();
     this.write(encodeText(FrameType.HELLO, this.pin));
     if (this.quality) this.write(encodeText(FrameType.CTRL, JSON.stringify(this.quality)));
     const slow = setTimeout(() => this.note("O app ainda não respondeu ao PIN (tela do celular bloqueada?)"), 8000);

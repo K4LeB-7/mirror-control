@@ -33,7 +33,11 @@ import {
   reservedBinds,
   saveStore,
   updateLayout,
+  removeControl,
+  restoreControl,
+  clearLayout,
 } from "../lib/profiles.ts";
+import { controlCount } from "../lib/layout.ts";
 import type { ModeEvent, ModeState } from "../lib/mouseModes.ts";
 import { INITIAL_MODE, isEditableTarget, nextMode, wheelPixels, wheelSwipe, WHEEL } from "../lib/mouseModes.ts";
 
@@ -343,4 +347,74 @@ test("campo de texto em foco não vira toque", () => {
   assert.equal(isEditableTarget({ tagName: "DIV", isContentEditable: true } as unknown as EventTarget), true);
   assert.equal(isEditableTarget({ tagName: "CANVAS" } as unknown as EventTarget), false);
   assert.equal(isEditableTarget(null), false);
+});
+
+// ---------------------------------------------------------------- excluir controles pré-definidos (0.3.1)
+
+test("perfil v2 salvo pela 0.3.0 (sem 'enabled') migra com joystick e câmera habilitados, sem perder nada", () => {
+  const old = { version: 2, activeId: "x", profiles: [{ id: "x", name: "Meu", landscape: { ...structuredClone(DEFAULT_LANDSCAPE), confirmed: true }, portrait: structuredClone(DEFAULT_PORTRAIT) }] };
+  for (const l of [old.profiles[0].landscape, old.profiles[0].portrait]) {
+    delete (l.joystick as { enabled?: boolean }).enabled;
+    delete (l.look as { enabled?: boolean }).enabled;
+  }
+  old.profiles[0].landscape.joystick.x = 0.3;
+  const s = loadStore(mem({ [STORE_KEY]: JSON.stringify(old) }));
+  const p = activeProfile(s);
+  assert.equal(p.name, "Meu");
+  assert.equal(p.landscape.joystick.enabled, true);
+  assert.equal(p.landscape.look.enabled, true);
+  assert.equal(p.landscape.joystick.x, 0.3);
+  assert.equal(p.landscape.confirmed, true);
+  assert.deepEqual(p.landscape.buttons, DEFAULT_LANDSCAPE.buttons);
+});
+
+test("todo controle é removível (botões padrão, joystick, câmera) e nada reaparece ao recarregar", () => {
+  let s = loadStore(mem());
+  for (const id of ["fire", "aim", "jump", "joystick", "look"]) s = updateLayout(s, "landscape", (l) => removeControl(l, id));
+  const l = activeProfile(s).landscape;
+  assert.equal(l.joystick.enabled, false);
+  assert.equal(l.look.enabled, false);
+  assert.deepEqual(l.buttons.map((b) => b.id), ["crouch", "reload"]);
+  assert.equal(l.joystick.up, "KeyW", "joystick removido guarda as teclas para adicionar de volta");
+  assert.deepEqual(controlBoxes(l, 1000, 450).map((b) => b.id), ["crouch", "reload"], "removidos não são desenhados");
+  // os botões que sobraram mantêm o ponteiro; um novo usa o menor livre
+  assert.deepEqual(l.buttons.map((b) => b.pointer), [4, 5]);
+  assert.equal(addButton(l, 0.5, 0.5).layout.buttons.at(-1)!.pointer, 1);
+  const kv = mem();
+  saveStore(kv, s);
+  const again = activeProfile(loadStore(kv)).landscape;
+  assert.equal(again.joystick.enabled, false);
+  assert.equal(again.look.enabled, false);
+  assert.deepEqual(again.buttons.map((b) => b.id), ["crouch", "reload"]);
+  // removeControl de um id inexistente/duplo não muda nada
+  assert.equal(removeControl(l, "joystick"), l);
+  assert.equal(removeControl(l, "nada"), l);
+});
+
+test("limpar tudo → layout vazio persistido; restaurar padrão e '+ Joystick/+ Câmera' trazem de volta", () => {
+  let s = updateLayout(loadStore(mem()), "portrait", (l) => ({ ...clearLayout(l), confirmed: true }));
+  const empty = activeProfile(s).portrait;
+  assert.equal(controlCount(empty), 0);
+  assert.deepEqual(controlBoxes(empty, 450, 1000), []);
+  assert.deepEqual(findConflicts(empty, reservedBinds("F8")), []);
+  const kv = mem();
+  saveStore(kv, s);
+  const reloaded = loadStore(kv);
+  assert.equal(controlCount(activeProfile(reloaded).portrait), 0, "o perfil fica sem nenhum controle depois de recarregar");
+  assert.equal(controlCount(activeProfile(reloaded).landscape), 7, "a outra orientação não muda");
+  s = updateLayout(reloaded, "portrait", (l) => restoreControl(restoreControl(l, "joystick"), "look"));
+  assert.equal(controlCount(activeProfile(s).portrait), 2);
+  assert.equal(activeProfile(s).portrait.joystick.x, DEFAULT_PORTRAIT.joystick.x);
+});
+
+test("joystick removido não conta nos conflitos de atalho; exportar/importar mantém os removidos", () => {
+  const l = removeControl(structuredClone(DEFAULT_LANDSCAPE), "joystick");
+  const withW = { ...l, buttons: [...l.buttons, { ...l.buttons[0], id: "w", bind: "key:KeyW", pointer: 6 }] };
+  assert.deepEqual(findConflicts(withW, []).map((c) => c.bind), [], "W livre com o joystick removido");
+  assert.deepEqual(findConflicts({ ...withW, joystick: { ...withW.joystick, enabled: true } }, []).map((c) => c.bind), ["key:KeyW"]);
+  let s = updateLayout(loadStore(mem()), "landscape", () => clearLayout(DEFAULT_LANDSCAPE));
+  const text = exportProfile(activeProfile(s));
+  s = importProfile(s, text);
+  assert.equal(controlCount(activeProfile(s).landscape), 0);
+  assert.equal(controlCount(activeProfile(s).portrait), 7);
 });

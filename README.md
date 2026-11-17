@@ -28,19 +28,25 @@ Site: https://mirror-control.vercel.app
    WASD vira um joystick virtual (um dedo que arrasta), teclas/botões do mouse viram toques fixos.
    **Mouse livre** (padrão): clique/arraste = toque, roda = rolar, botão direito = Voltar. **Mouse travado** (F8;
    Esc solta): Pointer Lock vira o dedo da câmera. Perfis com layout de retrato e de paisagem, editor em painel
-   lateral, rotação (Retrato/Paisagem/Auto) e Voltar/Início/Recentes pela barra (app 0.3.0+).
+   lateral, rotação (Retrato/Paisagem/Auto) e Voltar/Início/Recentes pela barra (app 0.3.0+). Todos os controles
+   (inclusive joystick, câmera e botões padrão) podem ser excluídos, com Desfazer, Limpar tudo e Restaurar padrão.
+5. **Toques confiáveis (app 0.3.1+)**: as decisões de toque ficam no `TouchPlanner.kt` (puro, testado na JVM): todo
+   dedo termina com o "levantar" do Android (clique nunca vira "segurar"), toque mínimo de 50 ms e dedo parado sem
+   gestos contínuos. No WebRTC, DOWN/UP levam uma geração, são repetidos e há keepalive + "deadman" no celular
+   (soltar perdido nunca prende o dedo). Detalhes em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md#entrada-pacote-de-18-bytes--v2-site-e-app-031).
    Guia de uso em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#usando-o-site-app-e-site-030).
 
 ## Web (testado: `tsc` e `next build` passam)
 ```bash
 cd web && npm install && npm run dev      # http://localhost:3000
-npm test                                  # testes unitários (protocolo USB + perfis/modos do mouse/geometria)
+npm test                                  # testes unitários (protocolo USB, perfis/modos do mouse/geometria, teclado/mouse → toques)
 ```
 Deploy: importe a pasta `web/` na Vercel (Root Directory = `web`). Pointer Lock exige HTTPS (a Vercel já dá).
 Variáveis opcionais: `NEXT_PUBLIC_PEER_HOST/PORT/PATH/KEY/SECURE`, `NEXT_PUBLIC_TURN_URL/USER/PASS`.
 Use Chrome/Edge (movimento de mouse sem aceleração).
 
-## Android (compila com `gradle assembleDebug`, testado só até o build — não em aparelho)
+## Android (compila com `gradle assembleDebug`, testado só até o build e testes JVM — não em aparelho)
+`gradle testDebugUnitTest` roda os testes JVM (protocolo USB, PIN, fila de vídeo, comandos, planejador de toques).
 Abra `android/` no Android Studio e rode no aparelho (minSdk 26), ou instale o APK acima.
 1. "Ativar serviço de acessibilidade" → ligar **Mirror Control** (sem isso só há vídeo).
 2. Colar/escanear o ID da sala → "Iniciar espelhamento" → aceitar a captura de tela.
@@ -52,4 +58,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão atual do app: 0.3.0 (ver `apk/version.json`).
+Versão atual do app: 0.3.1 (ver `apk/version.json`).

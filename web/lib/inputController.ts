@@ -1,6 +1,9 @@
-import { Action, CtrlMessage, INPUT_V2, POINTER_JOYSTICK, POINTER_LOOK, POINTER_MOUSE, encodePacket } from "./protocol.ts";
-import { ButtonControl, ButtonMode, Layout, clamp01, joystickOffset, keyBind, mouseBind, wheelBind } from "./layout.ts";
-import { MouseMode, Point, isEditableTarget, wheelSwipe } from "./mouseModes.ts";
+import { Action, INPUT_V2, POINTER_JOYSTICK, POINTER_LOOK, POINTER_MOUSE, encodePacket } from "./protocol.ts";
+import type { CtrlMessage } from "./protocol.ts";
+import { clamp01, joystickOffset, keyBind, mouseBind, wheelBind } from "./layout.ts";
+import type { ButtonControl, ButtonMode, Layout } from "./layout.ts";
+import { isEditableTarget, wheelSwipe } from "./mouseModes.ts";
+import type { MouseMode, Point } from "./mouseModes.ts";
 import type { UiSettings } from "./profiles.ts";
 
 /** O que o controlador precisa de uma sessão (WebRTC `RemoteSession` ou USB `UsbSession`). */
@@ -41,7 +44,7 @@ const BUTTON_BITS = [1, 4, 2];
 
 type Active = { pointer: number; mode: ButtonMode; source: string };
 /** Dedo pressionado: geração do DOWN, ponto do DOWN e posição atual (joystick/arrasto). */
-type Held = { gen: number; x: number; y: number; mx: number; my: number };
+type Held = { gen: number; x: number; y: number; mx: number; my: number; movedSinceKeepalive: boolean };
 
 /**
  * Converte teclado + mouse em pacotes de toque de 18 bytes.
@@ -77,7 +80,13 @@ export class InputController {
   /** Contadores (diagnóstico/testes/medições). */
   readonly stats = { sent: 0, deferred: 0 };
 
-  constructor(private session: InputSink, private h: InputHooks) {}
+  private session: InputSink;
+  private h: InputHooks;
+
+  constructor(session: InputSink, hooks: InputHooks) {
+    this.session = session;
+    this.h = hooks;
+  }
 
   attach() {
     if (this.attached) return;
@@ -180,7 +189,7 @@ export class InputController {
   private press(pointer: number, x: number, y: number) {
     if (this.held.has(pointer)) this.lift(pointer);
     const gen = ++this.gen;
-    this.held.set(pointer, { gen, x, y, mx: x, my: y });
+    this.held.set(pointer, { gen, x, y, mx: x, my: y, movedSinceKeepalive: false });
     this.edge(Action.DOWN, pointer, x, y, gen);
     this.syncKeepalive();
   }
@@ -198,6 +207,7 @@ export class InputController {
     if (!h) return;
     h.mx = x;
     h.my = y;
+    h.movedSinceKeepalive = true;
     this.send(Action.MOVE, pointer, x, y);
   }
 
@@ -226,7 +236,9 @@ export class InputController {
     }
     this.held.forEach((h, pointer) => {
       this.send(Action.DOWN, pointer, h.x, h.y, h.gen);
-      if (h.mx !== h.x || h.my !== h.y) this.send(Action.MOVE, pointer, h.mx, h.my);
+      // A posição só é repetida se nenhum MOVE saiu desde o último keepalive (arrasto contínuo já a manda).
+      if ((h.mx !== h.x || h.my !== h.y) && !h.movedSinceKeepalive) this.send(Action.MOVE, pointer, h.mx, h.my);
+      h.movedSinceKeepalive = false;
     });
   };
 

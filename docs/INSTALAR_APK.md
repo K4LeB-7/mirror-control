@@ -72,7 +72,17 @@ com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou 
   **Colar** (JSON). Cada perfil tem um layout de **retrato** e outro de **paisagem**; o site usa o da orientação atual
   do vídeo. O mapeamento da versão anterior é migrado para a paisagem do perfil "Padrão".
 - **Controles**: arraste no vídeo; ou selecione e use as **setas** (Shift = passo maior) ou **Definir posição clicando
-  no vídeo**; **Delete** apaga o botão selecionado. **+ Botão** → clique no vídeo → aperte a tecla/botão do mouse.
+  no vídeo**. **+ Botão** → clique no vídeo → aperte a tecla/botão do mouse.
+- **Excluir controles (site 0.3.1+)**: TODOS podem ser excluídos, inclusive os pré-definidos (joystick WASD, câmera e
+  os botões Atirar/Mirar/Pular/Agachar/Recarregar): **✕** ao lado do controle na lista, **Delete** com ele
+  selecionado, ou **Excluir joystick/câmera/botão** no editor dele. Joystick excluído = WASD não toca nada; câmera
+  excluída = o mouse travado não move a câmera. Cada exclusão aparece numa faixa com **Desfazer** (ou **Ctrl+Z** com o
+  painel aberto; o histórico vale até recarregar a página).
+  - **Limpar tudo**: deixa o layout desta orientação sem nenhum controle (começar do zero).
+  - **+ Joystick** / **+ Câmera**: trazem de volta o que foi excluído, com as mesmas teclas e posição.
+  - **Restaurar padrão**: volta o layout desta orientação ao padrão (também dá para desfazer).
+  - Fica salvo no navegador: os pré-definidos excluídos não voltam sozinhos ao recarregar. Perfis antigos continuam
+    iguais (nada é apagado na atualização).
 - **Atalho por captura**: clique no atalho e aperte a tecla, o botão do mouse (esquerdo/meio/direito) ou gire a roda
   (Esc cancela). Atalhos repetidos (inclusive com F8/Esc) aparecem em amarelo. Botões do mouse só disparam controles
   com o mouse travado.
@@ -80,6 +90,18 @@ com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou 
   Toque rápido. Até **7 botões** por layout; cada um usa sempre o mesmo dedo, mesmo que outro seja apagado.
 - **Joystick**: 4 teclas, raio do arrasto e tamanho do círculo. **Câmera**: sensibilidade X/Y, inverter Y e âncora.
 - **Mostrar controles** (barra) e **Opacidade** (painel → Opções) deixam os controles mais discretos.
+
+### Toques e cliques (app e site 0.3.1)
+- **Clique curto agora é clique**: até a 0.3.0, um clique de tecla/mouse muitas vezes ficava "segurando" no jogo (o
+  app removia o dedo sem mandar o "levantar" ao Android quando o soltar chegava no meio de um gesto). Corrigido no app
+  0.3.1: todo toque termina com o "levantar", e dura pelo menos 50 ms (o jogo reconhece como toque).
+- **Rede ruim (Wi-Fi)**: o canal de toques do WebRTC não retransmite pacotes. Com app e site 0.3.1, o site repete o
+  apertar/soltar e avisa o celular a cada 100 ms dos dedos ainda segurados; se esse aviso parar por 0,5 s (soltar
+  perdido, aba travada), o celular solta o dedo sozinho. Segurar uma tecla por muito tempo (andar com WASD) continua
+  funcionando. Com o app 0.3.0 o site funciona como antes.
+- Trocar de aba, Alt+Tab, abrir o menu do navegador, soltar o mouse fora da janela, sair do mouse travado ou trocar de
+  modo soltam todos os dedos na hora.
+- O app 0.3.1 também gasta bem menos CPU com teclas seguradas (antes: ~60 gestos/s por dedo parado; agora ~4/s).
 
 ## Problemas comuns
 - **Acessibilidade bloqueada ("configurações restritas", Xiaomi/Android 13+):** toque no item bloqueado e confirme o aviso;
@@ -157,6 +179,8 @@ use **Sair do USB** no site; no app, iniciar o espelhamento normal encerra o mod
 - **Toques não funcionam, só vídeo**: serviço de acessibilidade desligado (passo 1 do app; no Android 13+ veja
   "configurações restritas" acima).
 - **Imagem pesada/atrasada**: escolha 720p e/ou 30 fps no menu do site; use uma porta USB do próprio PC (não hub).
+  No modo Wi-Fi (WebRTC/VP8), aparelhos sem VP8 por hardware ficam limitados a 1080p 30 fps (o app avisa); para 60 fps
+  use 720p.
 
 ## Conexão por cabo USB via tethering (rede pelo cabo, modo WebRTC)
 1. Cabo USB **de dados** entre celular e PC (o Windows já traz o driver de rede por cabo; nada a instalar).

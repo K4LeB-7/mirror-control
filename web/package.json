@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test:usb": "node --experimental-strip-types --test tests/usbWire.test.ts",
     "test:ui": "node --experimental-strip-types --test tests/ui.test.ts",
-    "test": "node --experimental-strip-types --test tests/usbWire.test.ts tests/ui.test.ts"
+    "test:input": "node --experimental-strip-types --test tests/input.test.ts",
+    "test": "node --experimental-strip-types --test tests/usbWire.test.ts tests/ui.test.ts tests/input.test.ts"
   },
   "dependencies": {
     "@yume-chan/adb": "2.6.4",

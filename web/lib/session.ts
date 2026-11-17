@@ -12,9 +12,14 @@ export type SessionState = {
 type Listeners = {
   onState: (s: SessionState) => void;
   onStream: (s: MediaStream | null) => void;
-  /** Mensagem JSON do celular no canal "ctrl" (app 0.3.0+: status de rotate/nav). */
+  /** Mensagem JSON do celular no canal "ctrl" (app 0.3.0+: status de rotate/nav; 0.3.1+: caps). */
   onCtrl?: (text: string) => void;
+  /** Canal ctrl de uma conexão nova apareceu (antes do "caps" do celular). */
+  onConnect?: () => void;
 };
+
+/** Acima disto (bytes na fila do canal "input") MOVE/LOOK esperam o próximo quadro: ~450 pacotes. */
+const INPUT_CONGESTED_BYTES = 8 * 1024;
 
 // TURN público de teste (Open Relay, projeto Metered): retransmite o tráfego JÁ CRIPTOGRAFADO (DTLS-SRTP) quando a
 // conexão direta é bloqueada (firewall, isolamento de clientes do Wi-Fi, VPN, 4G/CGNAT). Para uso sério, defina o seu
@@ -85,6 +90,11 @@ export class RemoteSession {
 
   sendInput(buf: ArrayBuffer) {
     if (this.input?.readyState === "open") this.input.send(buf);
+  }
+
+  congested() {
+    const ch = this.input;
+    return !!ch && ch.readyState === "open" && ch.bufferedAmount > INPUT_CONGESTED_BYTES;
   }
 
   /** Com o canal fechado só a qualidade fica guardada (é reenviada ao abrir); rotate/nav sem conexão não fazem sentido. */
@@ -223,6 +233,7 @@ export class RemoteSession {
       } else if (ev.channel.label === "ctrl") {
         const ch = ev.channel;
         this.ctrl = ch;
+        this.l.onConnect?.();
         ch.onmessage = (m) => {
           if (this.ctrl === ch && typeof m.data === "string") this.l.onCtrl?.(m.data);
         };

@@ -1,5 +1,5 @@
 "use client";
-import { useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { blurAfterMouseClick } from "./Toolbar";
 import {
   BUTTON_SIZE,
@@ -11,6 +11,7 @@ import {
   MAX_BUTTONS,
   Orientation,
   bindLabel,
+  controlCount,
   keyLabel,
 } from "@/lib/layout";
 import {
@@ -51,6 +52,15 @@ type Props = {
   onLayout: (f: (l: Layout) => Layout) => void;
   onSettings: (s: UiSettings) => void;
   onReset: () => void;
+  /** Exclui qualquer controle (botão, joystick, câmera). */
+  onRemove: (id: string) => void;
+  /** Adiciona de volta o joystick/câmera removidos. */
+  onRestore: (id: "joystick" | "look") => void;
+  /** Layout vazio (começar do zero). */
+  onClear: () => void;
+  /** Texto da última exclusão/limpeza/restauração que pode ser desfeita (null = nada a desfazer). */
+  undoLabel: string | null;
+  onUndo: () => void;
   onClose: () => void;
 };
 
@@ -97,7 +107,7 @@ function Range(props: { label: string; value: number; min: number; max: number; 
 }
 
 /** Painel lateral do mapeador (fica ao lado do vídeo, que continua ao vivo e interativo). */
-export default function MapperPanel(p: Props) {
+export default memo(function MapperPanel(p: Props) {
   const prof = activeProfile(p.store);
   const l = p.layout;
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
@@ -314,6 +324,14 @@ export default function MapperPanel(p: Props) {
         </Section>
 
         <Section title={`Controles (${ORIENT[p.orientation].toLowerCase()})`}>
+          {p.undoLabel && (
+            <div data-testid="undo-bar" className="mb-2 flex items-center justify-between gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1">
+              <span className="truncate text-zinc-300">{p.undoLabel}</span>
+              <button data-testid="undo-button" className={`${btn} border-sky-500`} onClick={p.onUndo} title="Desfazer (Ctrl+Z)">
+                Desfazer
+              </button>
+            </div>
+          )}
           <div className="mb-2 flex flex-wrap gap-1">
             <button
               data-testid="add-button"
@@ -324,8 +342,29 @@ export default function MapperPanel(p: Props) {
             >
               {p.placing?.kind === "new" ? "Clique no vídeo…" : "+ Botão"}
             </button>
-            <button className={btn} onClick={p.onReset} title={`Volta o layout de ${ORIENT[p.orientation].toLowerCase()} ao padrão`}>
+            {!l.joystick.enabled && (
+              <button data-testid="restore-joystick" className={btn} onClick={() => p.onRestore("joystick")} title="Adiciona de volta o joystick (mesmas teclas e posição)">
+                + Joystick
+              </button>
+            )}
+            {!l.look.enabled && (
+              <button data-testid="restore-look" className={btn} onClick={() => p.onRestore("look")} title="Adiciona de volta a câmera do mouse travado">
+                + Câmera
+              </button>
+            )}
+          </div>
+          <div className="mb-2 flex flex-wrap gap-1">
+            <button data-testid="reset-layout" className={btn} onClick={p.onReset} title={`Volta o layout de ${ORIENT[p.orientation].toLowerCase()} ao padrão (dá para desfazer)`}>
               Restaurar padrão
+            </button>
+            <button
+              data-testid="clear-layout"
+              className={`${btn} border-rose-700`}
+              disabled={controlCount(l) === 0}
+              onClick={p.onClear}
+              title="Remove todos os controles deste layout (joystick, câmera e botões); dá para desfazer"
+            >
+              Limpar tudo
             </button>
             <span className="self-center text-zinc-500">
               {l.buttons.length}/{MAX_BUTTONS} botões
@@ -343,14 +382,16 @@ export default function MapperPanel(p: Props) {
 
           <ul className="space-y-1" data-testid="control-list">
             {[
-              { id: "joystick", name: "Joystick", info: [l.joystick.up, l.joystick.left, l.joystick.down, l.joystick.right].map(keyLabel).join("") },
-              { id: "look", name: "Câmera (mouse travado)", info: `sens. ${l.look.sensX.toFixed(1)}/${l.look.sensY.toFixed(1)}` },
+              ...(l.joystick.enabled
+                ? [{ id: "joystick", name: "Joystick", info: [l.joystick.up, l.joystick.left, l.joystick.down, l.joystick.right].map(keyLabel).join("") }]
+                : []),
+              ...(l.look.enabled ? [{ id: "look", name: "Câmera (mouse travado)", info: `sens. ${l.look.sensX.toFixed(1)}/${l.look.sensY.toFixed(1)}` }] : []),
               ...l.buttons.map((b) => ({ id: b.id, name: b.label, info: `${bindLabel(b.bind)} · dedo ${b.pointer}`, warn: !b.bind || conflictBinds.has(b.bind ?? "") })),
             ].map((c) => (
-              <li key={c.id}>
+              <li key={c.id} className="flex gap-1">
                 <button
                   data-testid={`list-${c.id}`}
-                  className={`flex w-full items-center justify-between rounded-md border px-2 py-1 text-left ${
+                  className={`flex min-w-0 flex-1 items-center justify-between rounded-md border px-2 py-1 text-left ${
                     p.selected === c.id ? "border-amber-300 bg-zinc-800" : "border-zinc-800 hover:bg-zinc-900"
                   }`}
                   onClick={() => p.onSelect(p.selected === c.id ? null : c.id)}
@@ -358,11 +399,27 @@ export default function MapperPanel(p: Props) {
                   <span className="truncate">{c.name}</span>
                   <span className={`ml-2 shrink-0 ${"warn" in c && c.warn ? "text-amber-300" : "text-zinc-400"}`}>{c.info}</span>
                 </button>
+                <button
+                  data-testid={`del-${c.id}`}
+                  aria-label={`Excluir ${c.name}`}
+                  title={`Excluir ${c.name} (dá para desfazer)`}
+                  className="shrink-0 rounded-md border border-zinc-800 px-2 text-zinc-400 hover:border-rose-600 hover:bg-rose-950 hover:text-rose-200"
+                  onClick={() => p.onRemove(c.id)}
+                >
+                  ✕
+                </button>
               </li>
             ))}
           </ul>
+          {controlCount(l) === 0 && (
+            <p data-testid="empty-layout" className="mt-2 rounded-md border border-dashed border-zinc-700 p-2 text-zinc-400">
+              Nenhum controle neste layout: as teclas e o mouse travado não tocam nada. Use <b>+ Botão</b>, <b>+ Joystick</b>,{" "}
+              <b>+ Câmera</b> ou <b>Restaurar padrão</b>.
+            </p>
+          )}
           <p className="mt-2 text-zinc-500">
-            Arraste no vídeo ou use as setas (Shift = passo maior). Delete apaga o botão selecionado.
+            Arraste no vídeo ou use as setas (Shift = passo maior). Delete (ou ✕) exclui o controle selecionado; Ctrl+Z
+            desfaz.
           </p>
         </Section>
 
@@ -418,21 +475,14 @@ export default function MapperPanel(p: Props) {
               <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: selBtn.id })}>
                 Definir posição clicando no vídeo
               </button>
-              <button
-                data-testid="delete-button"
-                className={`${btn} border-rose-600 bg-rose-900`}
-                onClick={() => {
-                  p.onLayout((x) => ({ ...x, buttons: x.buttons.filter((b) => b.id !== selBtn.id) }));
-                  p.onSelect(null);
-                }}
-              >
+              <button data-testid="delete-button" className={`${btn} border-rose-600 bg-rose-900`} onClick={() => p.onRemove(selBtn.id)}>
                 Excluir botão
               </button>
             </div>
           </Section>
         )}
 
-        {sel === "joystick" && (
+        {sel === "joystick" && l.joystick.enabled && (
           <Section title="Joystick" testId="joystick-editor">
             <div className="mb-2 grid grid-cols-2 gap-1">
               {DIRS.map(([d, name]) => (
@@ -458,13 +508,18 @@ export default function MapperPanel(p: Props) {
               step={0.01}
               onChange={(v) => p.onLayout((x) => ({ ...x, joystick: { ...x.joystick, size: v } }))}
             />
-            <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: "joystick" })}>
-              Definir posição clicando no vídeo
-            </button>
+            <div className="flex flex-wrap gap-1">
+              <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: "joystick" })}>
+                Definir posição clicando no vídeo
+              </button>
+              <button data-testid="delete-joystick" className={`${btn} border-rose-600 bg-rose-900`} onClick={() => p.onRemove("joystick")}>
+                Excluir joystick
+              </button>
+            </div>
           </Section>
         )}
 
-        {sel === "look" && (
+        {sel === "look" && l.look.enabled && (
           <Section title="Câmera (mouse travado)" testId="look-editor">
             <Range label="Sensibilidade X" value={l.look.sensX} min={0.1} max={5} step={0.1} fmt={(v) => v.toFixed(1)} onChange={(v) => p.onLayout((x) => ({ ...x, look: { ...x.look, sensX: v } }))} />
             <Range label="Sensibilidade Y" value={l.look.sensY} min={0.1} max={5} step={0.1} fmt={(v) => v.toFixed(1)} onChange={(v) => p.onLayout((x) => ({ ...x, look: { ...x.look, sensY: v } }))} />
@@ -473,9 +528,14 @@ export default function MapperPanel(p: Props) {
               Inverter Y
             </label>
             <div className="mb-2 text-zinc-500">A âncora é onde o dedo da câmera encosta: deixe numa área livre da tela do jogo.</div>
-            <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: "look" })}>
-              Definir posição clicando no vídeo
-            </button>
+            <div className="flex flex-wrap gap-1">
+              <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: "look" })}>
+                Definir posição clicando no vídeo
+              </button>
+              <button data-testid="delete-look" className={`${btn} border-rose-600 bg-rose-900`} onClick={() => p.onRemove("look")}>
+                Excluir câmera
+              </button>
+            </div>
           </Section>
         )}
 
@@ -507,4 +567,4 @@ export default function MapperPanel(p: Props) {
       </div>
     </aside>
   );
-}
+});

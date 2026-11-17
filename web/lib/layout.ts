@@ -31,6 +31,8 @@ export type ButtonControl = {
 };
 
 export type Joystick = {
+  /** false = removido do layout (WASD não age). Fica guardado para "adicionar de volta" com as mesmas teclas. */
+  enabled: boolean;
   x: number;
   y: number;
   /** Quanto o dedo virtual arrasta a partir do centro, em fração do lado menor da tela. */
@@ -45,6 +47,8 @@ export type Joystick = {
 };
 
 export type Look = {
+  /** false = removida do layout (o mouse travado não gera LOOK). */
+  enabled: boolean;
   /** Âncora onde o dedo da "câmera" encosta (modo travado). */
   x: number;
   y: number;
@@ -81,8 +85,8 @@ const btn = (
 
 /** Paisagem: joystick à esquerda, ações à direita. Sem sobreposição de 16:9 a 21:9 (ver tests/ui.test.ts). */
 export const DEFAULT_LANDSCAPE: Layout = {
-  joystick: { x: 0.14, y: 0.68, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
-  look: { x: 0.62, y: 0.45, sensX: 1, sensY: 1, invertY: false },
+  joystick: { enabled: true, x: 0.14, y: 0.68, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
+  look: { enabled: true, x: 0.62, y: 0.45, sensX: 1, sensY: 1, invertY: false },
   buttons: [
     btn("fire", "Atirar", "mouse:0", 1, 0.86, 0.6, 0.15),
     btn("aim", "Mirar", "mouse:2", 2, 0.76, 0.42, 0.15),
@@ -94,8 +98,8 @@ export const DEFAULT_LANDSCAPE: Layout = {
 
 /** Retrato: joystick embaixo à esquerda, ações embaixo à direita. Sem sobreposição de 9:16 a 9:21. */
 export const DEFAULT_PORTRAIT: Layout = {
-  joystick: { x: 0.25, y: 0.8, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
-  look: { x: 0.5, y: 0.45, sensX: 1, sensY: 1, invertY: false },
+  joystick: { enabled: true, x: 0.25, y: 0.8, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
+  look: { enabled: true, x: 0.5, y: 0.45, sensX: 1, sensY: 1, invertY: false },
   buttons: [
     btn("fire", "Atirar", "mouse:0", 1, 0.8, 0.74, 0.17),
     btn("aim", "Mirar", "mouse:2", 2, 0.62, 0.66, 0.17),
@@ -204,7 +208,7 @@ export type ControlBox = { id: string; kind: "joy" | "look" | "btn"; rect: Rect 
 export const MIN_CONTROL_PX = 22;
 export const LOOK_SIZE = 0.12;
 
-/** Retângulos em px de cada controle, para um vídeo de w×h px na página. Círculos: largura = altura. */
+/** Retângulos em px de cada controle (só os habilitados), para um vídeo de w×h px. Círculos: largura = altura. */
 export function controlBoxes(layout: Layout, w: number, h: number): ControlBox[] {
   const short = Math.min(w, h);
   const box = (id: string, kind: ControlBox["kind"], x: number, y: number, size: number): ControlBox => {
@@ -212,11 +216,16 @@ export function controlBoxes(layout: Layout, w: number, h: number): ControlBox[]
     return { id, kind, rect: { left: x * w - d / 2, top: y * h - d / 2, width: d, height: d } };
   };
   const j = layout.joystick;
-  return [
-    box("joystick", "joy", j.x, j.y, j.size),
-    box("look", "look", layout.look.x, layout.look.y, LOOK_SIZE),
-    ...layout.buttons.map((b) => box(b.id, "btn", b.x, b.y, b.size)),
-  ];
+  const out: ControlBox[] = [];
+  if (j.enabled) out.push(box("joystick", "joy", j.x, j.y, j.size));
+  if (layout.look.enabled) out.push(box("look", "look", layout.look.x, layout.look.y, LOOK_SIZE));
+  for (const b of layout.buttons) out.push(box(b.id, "btn", b.x, b.y, b.size));
+  return out;
+}
+
+/** Controles que existem no layout (para a lista do editor e para "layout vazio"). */
+export function controlCount(layout: Layout): number {
+  return (layout.joystick.enabled ? 1 : 0) + (layout.look.enabled ? 1 : 0) + layout.buttons.length;
 }
 
 export function rectsOverlap(a: Rect, b: Rect, margin = 0): boolean {

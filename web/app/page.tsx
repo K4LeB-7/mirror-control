@@ -8,6 +8,7 @@ import UsbPanel from "@/components/UsbPanel";
 import { InputController, InputSink } from "@/lib/inputController";
 import {
   Layout,
+  Orientation,
   clamp01,
   defaultLayout,
   fitContain,
@@ -24,9 +25,12 @@ import {
   DEFAULT_SETTINGS,
   activeProfile,
   addButton,
+  clearLayout,
   defaultStore,
   loadSettings,
   loadStore,
+  removeControl,
+  restoreControl,
   saveSettings,
   saveStore,
   updateLayout,
@@ -45,6 +49,9 @@ function newRoomId() {
   const bytes = crypto.getRandomValues(new Uint8Array(10));
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
 }
+
+type UndoEntry = { label: string; profileId: string; orientation: Orientation; layout: Layout };
+const UNDO_MAX = 20;
 
 const storage = () => {
   try {
@@ -81,6 +88,8 @@ export default function Page() {
   const [rotation, setRotation] = useState<RotateMode | null>(null);
   const [notice, setNotice] = useState<{ text: string; ok: boolean; at: number } | null>(null);
   const [stage, setStage] = useState({ w: 0, h: 0 });
+  /** Desfazer do editor: layouts anteriores a excluir/limpar/restaurar (mais novo por último). */
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -90,14 +99,16 @@ export default function Page() {
   const sinkRef = useRef<(InputSink & { sendCtrl(m: CtrlMessage): void }) | null>(null);
   const inputRef = useRef<InputController | null>(null);
   const autoOpened = useRef(new Set<string>());
+  /** Último "caps" do celular nesta conexão (0 = app antigo / ainda não chegou). */
+  const phoneCaps = useRef(0);
 
   const orientation = orientationFor(aspect);
   const profile = activeProfile(store);
   const layout = profile[orientation];
 
   // Refs lidos pelos listeners (o InputController vive fora do ciclo do React).
-  const r = useRef({ layout, aspect, settings, mode: modeState, editing, capture, placing, orientation });
-  r.current = { layout, aspect, settings, mode: modeState, editing, capture, placing, orientation };
+  const r = useRef({ layout, aspect, settings, mode: modeState, editing, capture, placing, orientation, profileId: profile.id });
+  r.current = { layout, aspect, settings, mode: modeState, editing, capture, placing, orientation, profileId: profile.id };
   const modeRef = useRef<ModeState>(INITIAL_MODE);
 
   // Sala estável entre recarregamentos (o QR continua válido) + perfis/preferências salvos.
@@ -132,10 +143,20 @@ export default function Page() {
   const onPhoneCtrl = useCallback(
     (text: string) => {
       const s = parsePhoneCtrl(text);
-      if (s) notify(s.text, s.ok);
+      if (!s) return;
+      if (s.type === "caps") {
+        // app 0.3.1+: entrada v2. Guardado também para o controlador criado depois (o USB conecta antes dele).
+        phoneCaps.current = s.input;
+        inputRef.current?.setPhoneCaps(s.input);
+      } else notify(s.text, s.ok);
     },
     [notify]
   );
+  /** Conexão nova com o celular: até ele mandar "caps", assume app antigo (sem redundância/keepalive). */
+  const onPhoneConnect = useCallback(() => {
+    phoneCaps.current = 0;
+    inputRef.current?.setPhoneCaps(0);
+  }, []);
 
   // ---------------------------------------------------------------- modos do mouse
 
@@ -188,18 +209,81 @@ export default function Page() {
 
   // ---------------------------------------------------------------- perfis
 
-  const commitStore = useCallback((f: (s: ProfileStore) => ProfileStore) => {
-    setStore((s) => {
-      const n = f(s);
-      if (n !== s) saveStore(storage(), n);
-      return n;
-    });
+  // Gravação no localStorage: imediata, exceto durante o arrasto de um controle (agrupada; grava ao soltar).
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unsaved = useRef<ProfileStore | null>(null);
+  const flushSave = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    const n = unsaved.current;
+    unsaved.current = null;
+    if (n) saveStore(storage(), n);
   }, []);
+  useEffect(() => {
+    window.addEventListener("pagehide", flushSave);
+    return () => {
+      window.removeEventListener("pagehide", flushSave);
+      flushSave();
+    };
+  }, [flushSave]);
+
+  const commitStore = useCallback(
+    (f: (s: ProfileStore) => ProfileStore, deferSave = false) => {
+      setStore((s) => {
+        const n = f(s);
+        if (n === s) return s;
+        unsaved.current = n;
+        if (!deferSave) flushSave();
+        else if (!saveTimer.current) saveTimer.current = setTimeout(flushSave, 300);
+        return n;
+      });
+    },
+    [flushSave]
+  );
 
   /** Edita o layout da orientação atual (marca como personalizado: o mapeador não abre mais sozinho). */
   const editLayout = useCallback(
-    (f: (l: Layout) => Layout) => commitStore((s) => updateLayout(s, r.current.orientation, (l) => ({ ...f(l), confirmed: true }))),
+    (f: (l: Layout) => Layout, deferSave = false) =>
+      commitStore((s) => updateLayout(s, r.current.orientation, (l) => ({ ...f(l), confirmed: true })), deferSave),
     [commitStore]
+  );
+
+  /** Edição que pode ser desfeita (excluir, limpar, restaurar padrão). */
+  const editUndoable = useCallback(
+    (label: string, f: (l: Layout) => Layout) => {
+      const before = r.current.layout;
+      const after = f(before);
+      if (after === before) return;
+      const entry: UndoEntry = { label, profileId: r.current.profileId, orientation: r.current.orientation, layout: before };
+      setUndoStack((u) => [...u, entry].slice(-UNDO_MAX));
+      editLayout(() => after);
+    },
+    [editLayout]
+  );
+
+  const undoRef = useRef(undoStack);
+  undoRef.current = undoStack;
+  const undo = useCallback(() => {
+    const u = undoRef.current;
+    const last = u[u.length - 1];
+    if (!last) return;
+    undoRef.current = u.slice(0, -1);
+    setUndoStack(undoRef.current);
+    commitStore((s) => ({
+      ...s,
+      profiles: s.profiles.map((p) => (p.id === last.profileId ? { ...p, [last.orientation]: { ...last.layout, confirmed: true } } : p)),
+    }));
+    setSelected(null);
+  }, [commitStore]);
+
+  const removeCtl = useCallback(
+    (id: string) => {
+      const l = r.current.layout;
+      const name = id === "joystick" ? "Joystick excluído" : id === "look" ? "Câmera excluída" : `Botão "${l.buttons.find((b) => b.id === id)?.label ?? id}" excluído`;
+      editUndoable(name, (x) => removeControl(x, id));
+      setSelected((s) => (s === id ? null : s));
+    },
+    [editUndoable]
   );
 
   const commitSettings = useCallback((s: UiSettings) => {
@@ -215,8 +299,10 @@ export default function Page() {
     setSelected(null);
     setCapture(null);
     setPlacing(null);
+    // O histórico de desfazer continua (dá para fechar, testar no jogo e voltar para desfazer).
     if (!r.current.layout.confirmed) editLayout((l) => l);
-  }, [editLayout]);
+    flushSave();
+  }, [editLayout, flushSave]);
 
   const openEditor = useCallback(() => {
     if (modeRef.current.mode === "locked") dispatchMode("escape");
@@ -262,6 +348,7 @@ export default function Page() {
       });
       inputRef.current = input;
       input.attach();
+      if (phoneCaps.current) input.setPhoneCaps(phoneCaps.current);
       return input;
     },
     [pointAt]
@@ -294,7 +381,8 @@ export default function Page() {
   // Sessão WebRTC + controlador de entrada.
   useEffect(() => {
     if (!roomId || mode !== "webrtc") return;
-    const session = new RemoteSession(roomId, { onState: setState, onStream: setStream, onCtrl: onPhoneCtrl });
+    phoneCaps.current = 0; // sessão WebRTC nova: o "caps" (se houver) chega quando o canal ctrl abrir
+    const session = new RemoteSession(roomId, { onState: setState, onStream: setStream, onCtrl: onPhoneCtrl, onConnect: onPhoneConnect });
     sessionRef.current = session;
     const input = makeInput(session);
     return () => {
@@ -304,7 +392,7 @@ export default function Page() {
       session.close();
       sessionRef.current = null;
     };
-  }, [roomId, mode, makeInput, onPhoneCtrl]);
+  }, [roomId, mode, makeInput, onPhoneCtrl, onPhoneConnect]);
 
   // Sessão USB: mesmo controlador de entrada, com o <canvas> como alvo do Pointer Lock.
   useEffect(() => {
@@ -431,32 +519,42 @@ export default function Page() {
   }, [capture, applyCapture]);
 
   const moveControl = useCallback(
-    (id: string, x: number, y: number) =>
+    (id: string, x: number, y: number, dragging = false) =>
       editLayout((l) => {
         if (id === "joystick") return { ...l, joystick: { ...l.joystick, x, y } };
         if (id === "look") return { ...l, look: { ...l.look, x, y } };
         return { ...l, buttons: l.buttons.map((b) => (b.id === id ? { ...b, x, y } : b)) };
-      }),
+      }, dragging),
     [editLayout]
   );
+  /** Arrasto no overlay: grava no localStorage ao soltar, não a cada movimento. */
+  const dragControl = useCallback((id: string, x: number, y: number) => moveControl(id, x, y, true), [moveControl]);
 
-  const onPlace = (x: number, y: number) => {
-    const pl = placing;
-    setPlacing(null);
-    if (!pl) return;
-    if (pl.kind === "move") return moveControl(pl.id, x, y);
-    const res = addButton(r.current.layout, x, y);
-    if (!res.id) return;
-    editLayout(() => res.layout);
-    setSelected(res.id);
-    setCapture({ kind: "btn", id: res.id }); // já pede a tecla do botão novo
-  };
+  const onPlace = useCallback(
+    (x: number, y: number) => {
+      const pl = r.current.placing;
+      setPlacing(null);
+      if (!pl) return;
+      if (pl.kind === "move") return moveControl(pl.id, x, y);
+      const res = addButton(r.current.layout, x, y);
+      if (!res.id) return;
+      editLayout(() => res.layout);
+      setSelected(res.id);
+      setCapture({ kind: "btn", id: res.id }); // já pede a tecla do botão novo
+    },
+    [moveControl, editLayout]
+  );
 
-  // Setas movem o controle selecionado (Shift = passo maior); Delete apaga o botão; Esc cancela.
+  // Setas movem o controle selecionado (Shift = passo maior); Delete exclui qualquer controle; Ctrl+Z desfaz.
   useEffect(() => {
     if (!editing) return;
     const onKey = (e: KeyboardEvent) => {
       if (r.current.capture || isEditableTarget(e.target)) return;
+      if (e.code === "KeyZ" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
       if (e.code === "Escape") {
         if (r.current.placing) setPlacing(null);
         else setSelected(null);
@@ -471,17 +569,38 @@ export default function Page() {
         const l = r.current.layout;
         const cur = id === "joystick" ? l.joystick : id === "look" ? l.look : l.buttons.find((b) => b.id === id);
         if (cur) moveControl(id, clamp01(cur.x + d[0]), clamp01(cur.y + d[1]));
-      } else if ((e.code === "Delete" || e.code === "Backspace") && id !== "joystick" && id !== "look") {
+      } else if (e.code === "Delete" || e.code === "Backspace") {
         e.preventDefault();
-        editLayout((l) => ({ ...l, buttons: l.buttons.filter((b) => b.id !== id) }));
-        setSelected(null);
+        removeCtl(id);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [editing, moveControl, editLayout]);
+  }, [editing, moveControl, removeCtl, undo]);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+
+  // Callbacks estáveis do painel (MapperPanel/ControlsOverlay são memo: não redesenham por avisos/estado).
+  const onPanelStore = useCallback((s: ProfileStore) => commitStore(() => s), [commitStore]);
+  const onPanelReset = useCallback(() => {
+    editUndoable("Layout padrão restaurado", () => defaultLayout(r.current.orientation));
+    setSelected(null);
+  }, [editUndoable]);
+  const onPanelClear = useCallback(() => {
+    editUndoable("Layout limpo (sem controles)", clearLayout);
+    setSelected(null);
+  }, [editUndoable]);
+  const onPanelRestore = useCallback((id: "joystick" | "look") => {
+    editLayout((l) => restoreControl(l, id));
+    setSelected(id);
+  }, [editLayout]);
+  const usbCanvasRef = useCallback(
+    (el: HTMLCanvasElement | null) => {
+      canvasRef.current = el;
+      usbSession?.setCanvas(el);
+    },
+    [usbSession]
+  );
 
   // ---------------------------------------------------------------- ações da barra
 
@@ -523,7 +642,7 @@ export default function Page() {
         opener = createAdbOpener(device);
       }
       const { UsbSession } = await import("@/lib/usbSession");
-      const s = new UsbSession(opener, usbPin, { onState: setUsbState, onCtrl: onPhoneCtrl });
+      const s = new UsbSession(opener, usbPin, { onState: setUsbState, onCtrl: onPhoneCtrl, onConnect: onPhoneConnect });
       if (document.pointerLockElement) document.exitPointerLock();
       setStream(null);
       setPreview(false);
@@ -665,10 +784,7 @@ export default function Page() {
           >
             {usbMode && (
               <canvas
-                ref={(el) => {
-                  canvasRef.current = el;
-                  usbSession?.setCanvas(el);
-                }}
+                ref={usbCanvasRef}
                 data-testid="usb-canvas"
                 className="absolute inset-0 h-full w-full bg-black"
               />
@@ -712,7 +828,8 @@ export default function Page() {
               selected={selected}
               placing={!!placing}
               onSelect={setSelected}
-              onMove={moveControl}
+              onMove={dragControl}
+              onMoveEnd={flushSave}
               onPlace={onPlace}
             />
           </div>
@@ -730,13 +847,15 @@ export default function Page() {
             onSelect={setSelected}
             onCapture={setCapture}
             onPlacing={setPlacing}
-            onStore={(s) => commitStore(() => s)}
+            onStore={onPanelStore}
             onLayout={editLayout}
             onSettings={commitSettings}
-            onReset={() => {
-              editLayout(() => defaultLayout(orientation));
-              setSelected(null);
-            }}
+            onReset={onPanelReset}
+            onRemove={removeCtl}
+            onRestore={onPanelRestore}
+            onClear={onPanelClear}
+            undoLabel={undoStack.length ? undoStack[undoStack.length - 1].label : null}
+            onUndo={undo}
             onClose={closeEditor}
           />
         )}

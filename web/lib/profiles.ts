@@ -63,6 +63,8 @@ function sanitizeJoystick(raw: unknown, d: Joystick): Joystick {
   const radius = clampTo(num(j.radius, d.radius), JOY_RADIUS.min, JOY_RADIUS.max);
   const code = (v: unknown, f: string) => (typeof v === "string" && /^[A-Za-z0-9]{1,32}$/.test(v) ? v : f);
   return {
+    // Campo novo (0.3.1): ausente nos perfis antigos = habilitado (nada some na migração).
+    enabled: j.enabled !== false,
     x: clamp01(num(j.x, d.x)),
     y: clamp01(num(j.y, d.y)),
     radius,
@@ -81,6 +83,7 @@ function sanitizeLook(raw: unknown, d: Look): Look {
   const sx = num(l.sensX, Number.isNaN(legacy) ? d.sensX : legacy);
   const sy = num(l.sensY, Number.isNaN(legacy) ? d.sensY : legacy);
   return {
+    enabled: l.enabled !== false,
     x: clamp01(num(l.x, d.x)),
     y: clamp01(num(l.y, d.y)),
     sensX: clampTo(sx, 0.1, 5),
@@ -311,6 +314,27 @@ export function removeButton(l: Layout, id: string): Layout {
   return { ...l, buttons: l.buttons.filter((b) => b.id !== id) };
 }
 
+/**
+ * Remove QUALQUER controle: botão (padrão ou extra) sai da lista; joystick e câmera ficam desabilitados (guardam
+ * posição/teclas para "adicionar de volta"). Devolve o mesmo objeto se o id não existe.
+ */
+export function removeControl(l: Layout, id: string): Layout {
+  if (id === "joystick") return l.joystick.enabled ? { ...l, joystick: { ...l.joystick, enabled: false } } : l;
+  if (id === "look") return l.look.enabled ? { ...l, look: { ...l.look, enabled: false } } : l;
+  return l.buttons.some((b) => b.id === id) ? removeButton(l, id) : l;
+}
+
+/** Adiciona de volta o joystick ou a câmera removidos (com as configurações que tinham). */
+export function restoreControl(l: Layout, id: "joystick" | "look"): Layout {
+  if (id === "joystick") return { ...l, joystick: { ...l.joystick, enabled: true } };
+  return { ...l, look: { ...l.look, enabled: true } };
+}
+
+/** "Limpar tudo / começar do zero": nenhum controle (joystick e câmera desabilitados, sem botões). */
+export function clearLayout(l: Layout): Layout {
+  return { ...l, joystick: { ...l.joystick, enabled: false }, look: { ...l.look, enabled: false }, buttons: [] };
+}
+
 // ---------------------------------------------------------------- conflitos de atalho
 
 export type Conflict = { bind: Bind; owners: string[] };
@@ -331,10 +355,12 @@ export function findConflicts(l: Layout, reserved: { bind: Bind; owner: string }
     map.set(bind, [...(map.get(bind) ?? []), owner]);
   };
   const j = l.joystick;
-  add(keyBind(j.up), "Joystick ↑");
-  add(keyBind(j.down), "Joystick ↓");
-  add(keyBind(j.left), "Joystick ←");
-  add(keyBind(j.right), "Joystick →");
+  if (j.enabled) {
+    add(keyBind(j.up), "Joystick ↑");
+    add(keyBind(j.down), "Joystick ↓");
+    add(keyBind(j.left), "Joystick ←");
+    add(keyBind(j.right), "Joystick →");
+  }
   for (const b of l.buttons) add(b.bind, b.label);
   for (const r of reserved) add(r.bind, r.owner);
   return [...map.entries()].filter(([, o]) => o.length > 1).map(([bind, owners]) => ({ bind, owners }));

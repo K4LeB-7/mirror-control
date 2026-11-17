@@ -1,5 +1,5 @@
 "use client";
-import { useRef } from "react";
+import { memo, useRef } from "react";
 import { Layout, bindLabel, clamp01, controlBoxes, keyLabel } from "@/lib/layout";
 
 type Props = {
@@ -16,6 +16,8 @@ type Props = {
   placing: boolean;
   onSelect: (id: string) => void;
   onMove: (id: string, x: number, y: number) => void;
+  /** Fim de um arrasto (a página grava o layout). */
+  onMoveEnd?: () => void;
   onPlace: (x: number, y: number) => void;
 };
 
@@ -25,8 +27,12 @@ const MODE_MARK = { hold: "", toggle: " ⇄", tap: " •" } as const;
  * Controles desenhados sobre o vídeo. Fora do editor não recebem cliques (o mouse livre toca o celular através
  * deles). No editor, cada controle pode ser selecionado e arrastado; o resto do vídeo continua interativo.
  */
-export default function ControlsOverlay({
-  layout, width, height, editing, show, opacity, locked, selected, placing, onSelect, onMove, onPlace,
+/**
+ * memo: a página re-renderiza por avisos/estado da conexão; o overlay só redesenha quando o layout, o tamanho ou o
+ * modo mudam (as callbacks da página são estáveis).
+ */
+export default memo(function ControlsOverlay({
+  layout, width, height, editing, show, opacity, locked, selected, placing, onSelect, onMove, onMoveEnd, onPlace,
 }: Props) {
   const root = useRef<HTMLDivElement>(null);
   const drag = useRef<{ id: string; pointerId: number; moved: boolean } | null>(null);
@@ -60,9 +66,11 @@ export default function ControlsOverlay({
             onMove(id, p.x, p.y);
           },
           onPointerUp: () => {
+            if (drag.current?.moved) onMoveEnd?.();
             drag.current = null;
           },
           onPointerCancel: () => {
+            if (drag.current?.moved) onMoveEnd?.();
             drag.current = null;
           },
         }
@@ -78,9 +86,9 @@ export default function ControlsOverlay({
   const fit = (d: number, text: string) => Math.max(8, Math.min(15, d * 0.22, (d * 0.8) / (Math.max(1, text.length) * 0.62)));
 
   const j = layout.joystick;
-  const joyBox = byId.get("joystick")!.rect;
-  const lookBox = byId.get("look")!.rect;
-  const showLook = editing || locked;
+  const joyBox = byId.get("joystick")?.rect;
+  const lookBox = byId.get("look")?.rect;
+  const showLook = (editing || locked) && !!lookBox;
 
   return (
     <div
@@ -101,7 +109,8 @@ export default function ControlsOverlay({
         </div>
       )}
 
-      {/* Joystick: círculo de verdade (largura = altura em px) */}
+      {/* Joystick: círculo de verdade (largura = altura em px). Removido do layout = não aparece. */}
+      {joyBox && (
       <div
         data-control="joystick"
         data-testid="ctl-joystick"
@@ -123,6 +132,7 @@ export default function ControlsOverlay({
           {keyLabel(j.right)}
         </span>
       </div>
+      )}
 
       {/* Âncora da câmera (modo travado) */}
       {showLook && (
@@ -133,7 +143,7 @@ export default function ControlsOverlay({
           className={`absolute flex items-center justify-center rounded-full border-2 border-dashed border-sky-300/80 bg-sky-400/10 text-sky-100 ${ring("look")} ${
             editing && !placing ? "pointer-events-auto cursor-move" : ""
           }`}
-          style={{ ...style("look"), fontSize: font(lookBox.width) }}
+          style={{ ...style("look"), fontSize: font(lookBox!.width) }}
           title={editing ? "Câmera (mouse travado) — arraste para mover" : undefined}
         >
           câmera
@@ -166,4 +176,4 @@ export default function ControlsOverlay({
       })}
     </div>
   );
-}
+});
