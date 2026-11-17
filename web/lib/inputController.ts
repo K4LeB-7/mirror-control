@@ -15,6 +15,8 @@ export type InputHooks = {
   getSettings(): UiSettings;
   /** Editor aberto: teclas mapeadas não viram toques (setas/Delete/captura são do editor). */
   keysSuspended(): boolean;
+  /** Esperando "pressione uma tecla" no editor: nem o atalho de travar vale. */
+  capturing(): boolean;
   /** Capturando atalho ou posicionando um controle: o mouse não vira toque. */
   mouseSuspended(): boolean;
   /**
@@ -128,12 +130,13 @@ export class InputController {
       if (this.locked()) this.h.onEscape();
       return;
     }
-    if (this.h.keysSuspended()) return; // editor/captura: o painel trata as teclas
+    if (this.h.capturing()) return; // o painel está capturando esta tecla
     if (e.code === this.h.getSettings().toggleKey) {
       e.preventDefault();
-      if (!e.repeat) this.h.onToggleMode();
+      if (!e.repeat) this.h.onToggleMode(); // com o editor aberto, fecha o painel e trava
       return;
     }
+    if (this.h.keysSuspended()) return; // editor: setas/Delete são do painel
     if (e.repeat || !this.keysActive()) {
       if (e.repeat && this.isMapped(e.code)) e.preventDefault();
       return;
@@ -185,6 +188,8 @@ export class InputController {
     } else if (e.button === 2) {
       e.preventDefault();
       this.session.sendCtrl?.({ type: "nav", action: "back" });
+    } else {
+      e.preventDefault(); // botão do meio: sem o "autoscroll" do navegador sobre o vídeo
     }
   };
 

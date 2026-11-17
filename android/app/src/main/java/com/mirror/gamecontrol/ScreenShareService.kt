@@ -140,6 +140,7 @@ class ScreenShareService : Service() {
         displayManager?.unregisterDisplayListener(displayListener)
         displayManager = null
         stopModes()
+        RotationController.release(this) // o celular volta a girar pelo sensor/do jeito que o usuário deixou
         publish("Parado")
         super.onDestroy()
     }

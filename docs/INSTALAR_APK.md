@@ -31,6 +31,56 @@ git add ../apk && git commit -m "APK 0.1.2" && git push
 ```
 O link de download acima já serve a versão nova após o push.
 
+## Usando o site (app e site 0.3.0+)
+A página tem uma **barra no topo** (nunca sobre a imagem do celular), o **vídeo no centro** usando todo o espaço livre
+e, quando você mapeia, um **painel à direita** (em janelas estreitas, embaixo). O vídeo continua ao vivo e clicável
+com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou a resposta do celular.
+
+### Dois modos de mouse
+| | **Mouse livre** (padrão ao conectar) | **Mouse travado** (para jogar) |
+|---|---|---|
+| Cursor | visível, sem Pointer Lock | some (Pointer Lock) |
+| Botão esquerdo | toque/arrasto no ponto clicado | controle mapeado (padrão: Atirar) |
+| Botão direito | **Voltar** do Android | controle mapeado (padrão: Mirar) |
+| Roda | rola a tela (gera um swipe curto) | controle mapeado, se houver (Roda ↑/↓) |
+| Movimento | — | câmera (dedo que desliza a partir da âncora "câmera") |
+| Teclas mapeadas | funcionam (opção "Teclas ativas no modo livre") | funcionam |
+
+- **F8** (configurável no painel → Opções) ou o botão **Travar mouse** alternam os modos. **Esc** sempre solta o mouse
+  e volta ao livre; o site nunca trava de novo sozinho (clicar no vídeo no modo livre é só um toque).
+- O selo **Mouse livre / Mouse travado** na barra mostra o modo e o atalho. Trocar de modo, perder o foco da janela ou
+  girar a tela solta todos os dedos.
+- Com o foco num campo de texto do site as teclas não viram toques. Depois do Esc o Chrome pede ~1 s antes de deixar
+  travar de novo.
+
+### Girar a tela e botões do Android
+- **Retrato / Paisagem / Auto** na barra pedem ao celular para girar (Auto devolve ao sensor). O vídeo, a proporção e o
+  layout de controles acompanham sozinhos, sem derrubar a conexão.
+- Como o app gira: com o **serviço de acessibilidade** ativo, uma janela invisível de 1×1 pede a orientação ao Android
+  (não precisa de nada além disso). Sem acessibilidade, o app usa **Modificar configurações do sistema** (botão
+  **Permitir girar a tela pelo site** no app). Se nenhum dos dois estiver disponível, a barra do site explica o que
+  ativar. Ao parar o espelhamento a rotação volta ao normal.
+- **Limitação:** algumas ROMs (e tablets/telas dobráveis no Android 12L+ e 16) ignoram pedidos de orientação de
+  janelas; nesses aparelhos use o botão de rotação do próprio celular. Apps/jogos que travam a própria orientação
+  continuam mandando.
+- **◁ Voltar / ○ Início / ▢ Recentes** na barra (e o botão direito no modo livre) usam a acessibilidade.
+
+### Mapear teclas (perfis, retrato e paisagem)
+- Na **primeira vez** que o vídeo aparece (e na primeira vez em cada orientação), o mapeador abre sozinho com um guia de
+  3 passos. Depois, use **Mapear** na barra. **Concluir** fecha e salva (tudo fica salvo no navegador).
+- **Perfis**: Novo, Duplicar, Renomear, Excluir, **Exportar** (baixa um .json), **Importar arquivo**, **Copiar** /
+  **Colar** (JSON). Cada perfil tem um layout de **retrato** e outro de **paisagem**; o site usa o da orientação atual
+  do vídeo. O mapeamento da versão anterior é migrado para a paisagem do perfil "Padrão".
+- **Controles**: arraste no vídeo; ou selecione e use as **setas** (Shift = passo maior) ou **Definir posição clicando
+  no vídeo**; **Delete** apaga o botão selecionado. **+ Botão** → clique no vídeo → aperte a tecla/botão do mouse.
+- **Atalho por captura**: clique no atalho e aperte a tecla, o botão do mouse (esquerdo/meio/direito) ou gire a roda
+  (Esc cancela). Atalhos repetidos (inclusive com F8/Esc) aparecem em amarelo. Botões do mouse só disparam controles
+  com o mouse travado.
+- **Tipo do botão**: Segurar (dedo fica enquanto a tecla está apertada), Alternar (1º aperto encosta, 2º solta) ou
+  Toque rápido. Até **7 botões** por layout; cada um usa sempre o mesmo dedo, mesmo que outro seja apagado.
+- **Joystick**: 4 teclas, raio do arrasto e tamanho do círculo. **Câmera**: sensibilidade X/Y, inverter Y e âncora.
+- **Mostrar controles** (barra) e **Opacidade** (painel → Opções) deixam os controles mais discretos.
+
 ## Problemas comuns
 - **Acessibilidade bloqueada ("configurações restritas", Xiaomi/Android 13+):** toque no item bloqueado e confirme o aviso;
   depois *Configurações → Apps → Gerenciar apps → Mirror Control → ⋮ → Permitir configurações restritas*.
@@ -40,7 +90,10 @@ O link de download acima já serve a versão nova após o push.
   "Resposta recebida", "ICE: connected/failed…") e o site tem o painel **Diagnóstico da conexão**. Celular e notebook
   devem estar na **mesma rede Wi-Fi** (sem "isolamento de clientes"/rede de convidados); em redes diferentes é preciso um
   servidor TURN. Use o ID mostrado no site (um ID antigo não conecta).
-- **Mapear teclas sem o celular:** botão **Mapear teclas e mouse** na tela inicial do site.
+- **Mapear teclas sem o celular:** botão **Mapear teclas e mouse** na tela inicial do site (Retrato/Paisagem na barra
+  trocam o layout que está sendo editado).
+- **"Para girar pelo site: ative…"** na barra: ligue o serviço de acessibilidade do app ou toque em **Permitir girar a
+  tela pelo site** e ative "Modificar configurações do sistema" para o Mirror Control.
 
 ## Se ficar em "conectando" (firewall / rede)
 O app e o site usam conexão direta (WebRTC/UDP) e, se ela for bloqueada, um servidor **TURN** de retransmissão
@@ -79,7 +132,8 @@ servidor de sinalização não importam. Precisa do **Google Chrome ou Microsoft
 5. Na 1ª vez, o celular pergunta **"Permitir depuração USB?"** com a impressão digital da chave do navegador: marque
    **Sempre permitir deste computador** e toque em **Permitir**. (A chave fica guardada neste navegador; outro
    navegador/perfil ou limpar os dados do site pede de novo.)
-6. O vídeo aparece; clique nele para capturar o mouse (ESC solta). Teclas, mouse e mapeamento funcionam igual ao modo Wi-Fi.
+6. O vídeo aparece com o mouse **livre** (clique = toque). Para jogar, **F8** trava o mouse (Esc solta). Teclas, mouse,
+   rotação e mapeamento funcionam igual ao modo Wi-Fi (veja "Usando o site" abaixo).
 Se o cabo for solto e recolocado, o site reconecta sozinho (com o app ainda em modo USB). Para voltar ao modo Wi-Fi/QR,
 use **Sair do USB** no site; no app, iniciar o espelhamento normal encerra o modo USB (um modo por vez).
 

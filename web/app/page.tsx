@@ -251,6 +251,7 @@ export default function Page() {
         getMode: () => modeRef.current.mode,
         getSettings: () => r.current.settings,
         keysSuspended: () => r.current.editing || !!r.current.capture,
+        capturing: () => !!r.current.capture,
         mouseSuspended: () => !!r.current.capture || !!r.current.placing,
         pointAt,
         onToggleMode: () => {
@@ -630,6 +631,7 @@ export default function Page() {
           dispatchMode("toggle");
         }}
         canControl={canControl}
+        canRotate={canControl || (!usbMode && !stream)}
         rotation={rotation}
         onRotate={rotate}
         onNav={nav}

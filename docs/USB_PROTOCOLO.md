@@ -40,7 +40,17 @@ Um `len` fora do limite é erro de protocolo: o receptor fecha a conexão (não 
 4. **INPUT** → `TouchInjector`. **CTRL**:
    - `{"type":"quality","height":720|1080,"fps":30|60}` → reinicia o encoder (só se mudou);
    - `{"type":"keyframe"}` → pede um IDR (`PARAMETER_KEY_REQUEST_SYNC_FRAME`); o navegador manda quando o decodificador
-     falhou ou descartou quadros.
+     falhou ou descartou quadros;
+   - `{"type":"rotate","mode":"portrait"|"landscape"|"auto"}` (app 0.3.0+) → gira a tela (`RotationController`). Se o
+     tamanho do vídeo mudar, o encoder reinicia e o celular manda **INFO + VIDEO_CONFIG + VIDEO_KEY** novos na MESMA
+     conexão (o navegador reconfigura o decodificador e o `<canvas>` e troca o layout retrato/paisagem). Resposta
+     sempre: CTRL `status` (abaixo);
+   - `{"type":"nav","action":"back"|"home"|"recents"}` (app 0.3.0+) → `performGlobalAction` do serviço de
+     acessibilidade. Resposta só em caso de falha (ex.: acessibilidade desligada).
+
+   **CTRL celular → navegador** (app 0.3.0+): `{"type":"status","scope":"rotate"|"nav","ok":true|false,"text":"…"}`,
+   texto em português para mostrar na barra do site. Os mesmos JSON `rotate`/`nav`/`status` passam pelo DataChannel
+   `ctrl` no modo WebRTC. Um app antigo (≤ 0.2.0) ignora `rotate`/`nav` sem responder.
 5. Ao desconectar: celular solta todos os dedos (`releaseAll`) e para o encoder (a VirtualDisplay fica sem surface,
    pronta para a próxima conexão).
 

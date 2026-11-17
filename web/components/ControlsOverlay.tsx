@@ -75,7 +75,7 @@ export default function ControlsOverlay({
   };
   const font = (d: number) => Math.max(9, Math.min(15, d * 0.2));
   /** Fonte que faz o texto caber na largura do círculo (rótulos longos encolhem até 8 px). */
-  const fit = (d: number, text: string) => Math.max(8, Math.min(15, d * 0.22, (d * 0.86) / (Math.max(1, text.length) * 0.56)));
+  const fit = (d: number, text: string) => Math.max(8, Math.min(15, d * 0.22, (d * 0.8) / (Math.max(1, text.length) * 0.62)));
 
   const j = layout.joystick;
   const joyBox = byId.get("joystick")!.rect;

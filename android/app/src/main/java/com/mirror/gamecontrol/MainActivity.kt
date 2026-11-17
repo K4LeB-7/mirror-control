@@ -58,6 +58,14 @@ class MainActivity : AppCompatActivity() {
         b.openAccessibility.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+        b.allowRotation.setOnClickListener {
+            // Fallback da rotação (Settings.System). Com o serviço de acessibilidade ativo isso nem é preciso.
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, android.net.Uri.parse("package:$packageName")))
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS))
+            }
+        }
         b.start.setOnClickListener { startMirroring() }
         b.startUsb.setOnClickListener {
             usbRequested = true
@@ -81,8 +89,16 @@ class MainActivity : AppCompatActivity() {
         handler.post(usbPoll)
         ScreenShareService.statusListener = { s -> runOnUiThread { showStatus(s) } }
         showStatus(ScreenShareService.status)
+        val a11y = accessibilityEnabled()
         b.accessibilityState.text =
-            if (accessibilityEnabled()) "✔ Acessibilidade ativa" else "✘ Acessibilidade desativada (sem ela só há vídeo, sem toques)"
+            if (a11y) "✔ Acessibilidade ativa" else "✘ Acessibilidade desativada (sem ela só há vídeo, sem toques)"
+        val canWrite = RotationController.canWriteSettings(this)
+        b.rotationState.text = when {
+            a11y && canWrite -> "✔ Girar pelo site: acessibilidade (e configurações do sistema como reserva)"
+            a11y -> "✔ Girar pelo site: pelo serviço de acessibilidade"
+            canWrite -> "✔ Girar pelo site: por Modificar configurações do sistema"
+            else -> "✘ Girar pelo site: ative a acessibilidade ou toque no botão acima"
+        }
     }
 
     override fun onPause() {

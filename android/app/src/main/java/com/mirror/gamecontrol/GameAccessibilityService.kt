@@ -26,6 +26,7 @@ class GameAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         if (instance === this) instance = null
+        RotationController.onServiceGone(this)
         if (::injector.isInitialized) injector.releaseAll()
         return super.onUnbind(intent)
     }

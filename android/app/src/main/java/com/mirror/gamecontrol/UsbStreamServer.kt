@@ -250,9 +250,16 @@ class UsbStreamServer(
         }
     }
 
-    private fun onCtrl(json: String) {
+    private fun onCtrl(json: String, from: Session) {
         val msg = try { JSONObject(json) } catch (_: Exception) { return }
         when (msg.optString("type")) {
+            // rotate / nav (app 0.3.0+). Girar dispara onDisplayChanged → encoder reinicia → INFO+CONFIG+KEY novos.
+            "rotate", "nav" -> {
+                val cmd = RemoteCommand.from(msg.optString("type"), msg.optString("mode"), msg.optString("action"))
+                RemoteControl.handle(ctx, cmd) { reply ->
+                    if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8))
+                }
+            }
             "quality" -> {
                 val side = if (msg.optInt("height", shortSide) >= 1080) 1080 else 720
                 val f = if (msg.optInt("fps", fps) >= 60) 60 else 30
@@ -305,7 +312,7 @@ class UsbStreamServer(
                     val f = UsbWire.read(input) ?: break
                     when (f.type) {
                         UsbWire.INPUT -> onInput(f.payload)
-                        UsbWire.CTRL -> onCtrl(String(f.payload, Charsets.UTF_8))
+                        UsbWire.CTRL -> onCtrl(String(f.payload, Charsets.UTF_8), this)
                         else -> {} // HELLO repetido / tipos desconhecidos: ignorados
                     }
                 }

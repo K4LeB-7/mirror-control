@@ -25,12 +25,16 @@ Site: https://mirror-control.vercel.app
    abre `tcp:27183` no celular e recebe H.264 (WebCodecs → `<canvas>`); entrada no mesmo pacote de 18 bytes.
    Protocolo em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md), passo a passo em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md).
 4. Mapeamento por **percentual** (0.0–1.0) da tela → funciona em qualquer proporção.
-   WASD vira um joystick virtual (um dedo que arrasta), mouse + Pointer Lock vira o dedo da câmera,
-   teclas/botões do mouse viram toques fixos. Há editor visual ("Mapear teclas").
+   WASD vira um joystick virtual (um dedo que arrasta), teclas/botões do mouse viram toques fixos.
+   **Mouse livre** (padrão): clique/arraste = toque, roda = rolar, botão direito = Voltar. **Mouse travado** (F8;
+   Esc solta): Pointer Lock vira o dedo da câmera. Perfis com layout de retrato e de paisagem, editor em painel
+   lateral, rotação (Retrato/Paisagem/Auto) e Voltar/Início/Recentes pela barra (app 0.3.0+).
+   Guia de uso em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#usando-o-site-app-e-site-030).
 
 ## Web (testado: `tsc` e `next build` passam)
 ```bash
 cd web && npm install && npm run dev      # http://localhost:3000
+npm test                                  # testes unitários (protocolo USB + perfis/modos do mouse/geometria)
 ```
 Deploy: importe a pasta `web/` na Vercel (Root Directory = `web`). Pointer Lock exige HTTPS (a Vercel já dá).
 Variáveis opcionais: `NEXT_PUBLIC_PEER_HOST/PORT/PATH/KEY/SECURE`, `NEXT_PUBLIC_TURN_URL/USER/PASS`.
@@ -48,4 +52,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão atual do app: 0.2.0 (ver `apk/version.json`).
+Versão atual do app: 0.3.0 (ver `apk/version.json`).

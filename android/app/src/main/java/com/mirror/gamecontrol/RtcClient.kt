@@ -439,6 +439,14 @@ class RtcClient(
                     val h = msg.optInt("height", qualityHeight)
                     val f = msg.optInt("fps", qualityFps)
                     main.post { if (!disposed) applyQuality(h, f) }
+                } else {
+                    // rotate / nav (app 0.3.0+): a rotação mexe na tela; a captura acompanha via onDisplayChanged.
+                    val cmd = RemoteCommand.from(msg.optString("type"), msg.optString("mode"), msg.optString("action"))
+                    RemoteControl.handle(ctx, cmd) { reply ->
+                        if (!disposed && ch.state() == DataChannel.State.OPEN) {
+                            ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(reply.toByteArray(Charsets.UTF_8)), false))
+                        }
+                    }
                 }
             } catch (_: Exception) {
             }

@@ -16,6 +16,8 @@ type Props = {
   toggleKey: string;
   onToggleMode: () => void;
   canControl: boolean;
+  /** Na pré-visualização (sem celular) Retrato/Paisagem só trocam o layout editado. */
+  canRotate: boolean;
   rotation: RotateMode | null;
   onRotate: (m: RotateMode) => void;
   onNav: (a: NavAction) => void;
@@ -97,7 +99,7 @@ export default function Toolbar(p: Props) {
             key={m}
             className={`${btn} ${p.rotation === m ? on : ""}`}
             aria-pressed={p.rotation === m}
-            disabled={!p.canControl}
+            disabled={!p.canRotate}
             onClick={() => p.onRotate(m)}
             title={m === "auto" ? "Volta a girar pelo sensor do celular" : `Gira o celular para ${label.toLowerCase()}`}
           >
