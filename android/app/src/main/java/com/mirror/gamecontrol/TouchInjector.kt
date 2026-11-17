@@ -5,174 +5,243 @@ import android.accessibilityservice.GestureDescription
 import android.accessibilityservice.GestureDescription.StrokeDescription
 import android.graphics.Path
 import android.os.Handler
-import android.os.Looper
-import kotlin.math.abs
-import kotlin.math.hypot
+import android.os.HandlerThread
+import android.os.Process
+import android.os.SystemClock
+import android.util.Log
 
 /**
- * Multitouch persistente sobre dispatchGesture().
+ * Multitouch persistente sobre dispatchGesture(). As decisões (quando despachar, qual segmento de cada dedo, quando
+ * um dedo levanta) ficam no [TouchPlanner] (puro, testado na JVM); aqui só montamos os StrokeDescription.
  *
- * Um dedo "segurado" é uma cadeia de StrokeDescription com willContinue=true, cada segmento
- * continuando o anterior (continueStroke). Só um gesture fica em voo por vez: ao completar,
- * despachamos o próximo segmento de TODOS os dedos ativos. Tudo roda na main thread.
+ * Roda numa thread própria ("touch-injector", prioridade de display), não na main thread: a UI do app e o
+ * RtcClient não atrasam toques, e vice-versa. AccessibilityService.dispatchGesture é sincronizado internamente.
  */
 class TouchInjector(
     private val service: AccessibilityService,
     private val screen: () -> Pair<Int, Int>,
 ) {
-    private class Finger(var x: Float, var y: Float) {
-        var lastX = x
-        var lastY = y
-        var stroke: StrokeDescription? = null
-        var releasing = false
-        /** Se != null, ao terminar o stroke atual o dedo reaparece nesta posição (re-ancoragem da câmera). */
-        var restartAt: Pair<Float, Float>? = null
+    private val thread = HandlerThread("touch-injector").apply { start() }
+    private val handler = Handler(thread.looper)
+    private val planner = TouchPlanner(maxStrokes = safeMaxStrokes())
+    @Volatile private var closed = false
+
+    // Só na thread do injetor:
+    private val strokes = arrayOfNulls<StrokeDescription>(TouchPlanner.MAX_POINTERS)
+    private val paths = Array(TouchPlanner.MAX_POINTERS) { Path() }
+    private val built = arrayOfNulls<StrokeDescription>(TouchPlanner.MAX_POINTERS)
+    private var current: GestureDescription? = null
+    private var wakeAt = Long.MAX_VALUE
+    private var screenW = 0
+    private var screenH = 0
+    private var screenAt = 0L
+
+    private val wake = Runnable {
+        wakeAt = Long.MAX_VALUE
+        pump()
+    }
+    private val lookIdle = Runnable {
+        planner.up(LOOK_POINTER, now())
+        pump()
     }
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val fingers = HashMap<Int, Finger>()
-    private var inFlight = false
+    private val callback = object : AccessibilityService.GestureResultCallback() {
+        override fun onCompleted(g: GestureDescription?) {
+            if (g !== current) return
+            current = null
+            planner.completed(now())
+            pump()
+        }
 
-    // Câmera (mouse look): dedo virtual que desliza a partir de uma âncora.
-    private var lookAnchor = 0f to 0f
-    private val lookIdle = Runnable { up(LOOK_POINTER) }
+        override fun onCancelled(g: GestureDescription?) {
+            if (g !== current) return
+            current = null
+            planner.cancelled(now())
+            pump()
+        }
+    }
 
-    /** API pública: pode ser chamada de qualquer thread (ex.: thread do DataChannel). */
-    fun handle(p: InputProtocol.Packet) {
+    init {
         handler.post {
-            when (p.action) {
-                InputProtocol.DOWN -> down(p.pointer, p.x, p.y)
-                InputProtocol.MOVE -> move(p.pointer, p.x, p.y)
-                InputProtocol.UP -> up(p.pointer)
-                InputProtocol.LOOK -> look(p)
-                InputProtocol.RELEASE_ALL -> doReleaseAll()
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+            } catch (e: Exception) {
+                Log.w(TAG, "prioridade da thread: $e")
             }
         }
     }
 
-    fun releaseAll() = handler.post { doReleaseAll() }
-
-    private fun px(nx: Float, ny: Float): Pair<Float, Float> {
-        val (w, h) = screen()
-        return nx * (w - 1) to ny * (h - 1)
+    /** API pública: pode ser chamada de qualquer thread (ex.: thread do DataChannel / usb-read). */
+    fun handle(p: InputProtocol.Packet) {
+        if (closed) return
+        handler.post { apply(p) }
     }
 
-    private fun down(id: Int, nx: Float, ny: Float) {
-        val (x, y) = px(nx, ny)
-        val existing = fingers[id]
-        if (existing != null && !existing.releasing) return
-        fingers[id] = Finger(x, y)
-        pump()
-    }
-
-    private fun move(id: Int, nx: Float, ny: Float) {
-        val f = fingers[id] ?: return
-        if (f.releasing) return
-        val (x, y) = px(nx, ny)
-        f.x = x
-        f.y = y
-        pump()
-    }
-
-    private fun up(id: Int) {
-        val f = fingers[id] ?: return
-        f.releasing = true
-        f.restartAt = null
-        pump()
-    }
-
-    private fun look(p: InputProtocol.Packet) {
-        val (w, h) = screen()
-        val f = fingers[LOOK_POINTER]
-        if (f == null || f.releasing) {
-            lookAnchor = px(p.x, p.y)
-            fingers[LOOK_POINTER] = Finger(lookAnchor.first, lookAnchor.second)
+    fun releaseAll() {
+        if (closed) return
+        handler.post {
+            handler.removeCallbacks(lookIdle)
+            planner.releaseAll()
+            pump()
         }
-        val finger = fingers[LOOK_POINTER] ?: return
-        finger.x += p.dx * h
-        finger.y += p.dy * h
-        // Saiu da zona de câmera: termina o stroke e recomeça na âncora (como levantar o dedo e voltar).
-        val zone = 0.22f * minOf(w, h)
-        if (hypot(finger.x - lookAnchor.first, finger.y - lookAnchor.second) > zone) {
-            finger.x = finger.x.coerceIn(0f, (w - 1).toFloat())
-            finger.y = finger.y.coerceIn(0f, (h - 1).toFloat())
-            finger.releasing = true
-            finger.restartAt = lookAnchor
-        }
-        handler.removeCallbacks(lookIdle)
-        handler.postDelayed(lookIdle, LOOK_IDLE_MS)
-        pump()
     }
 
-    private fun doReleaseAll() {
-        handler.removeCallbacks(lookIdle)
-        for (f in fingers.values) {
-            f.releasing = true
-            f.restartAt = null
+    /** Nova conexão (WebRTC/USB): solta tudo e zera gerações e deadman. */
+    fun newSession() {
+        if (closed) return
+        handler.post {
+            handler.removeCallbacks(lookIdle)
+            planner.resetSession()
+            pump()
+        }
+    }
+
+    /** CTRL `{"type":"input","deadmanMs":N}` do site novo (ele manda keepalive dos dedos segurados). */
+    fun setDeadman(ms: Long) {
+        if (closed) return
+        handler.post {
+            planner.setDeadman(if (ms <= 0) 0 else ms.coerceIn(MIN_DEADMAN_MS, MAX_DEADMAN_MS))
+            pump()
+        }
+    }
+
+    /** Serviço desligando: solta os dedos e encerra a thread. */
+    fun shutdown() {
+        if (closed) return
+        handler.post {
+            handler.removeCallbacks(lookIdle)
+            planner.releaseAll()
+            pump()
+        }
+        closed = true
+        handler.postDelayed({ thread.quitSafely() }, 300)
+    }
+
+    // ------------------------------------------------------------------ thread do injetor
+
+    private fun now() = SystemClock.uptimeMillis()
+
+    private fun refreshScreen(t: Long) {
+        if (screenW > 0 && t - screenAt < SCREEN_TTL_MS) return
+        val (w, h) = try { screen() } catch (_: Exception) { screenW to screenH }
+        if (w > 0 && h > 0) {
+            screenW = w
+            screenH = h
+            planner.setBounds(w - 1, h - 1)
+        }
+        screenAt = t
+    }
+
+    private fun apply(p: InputProtocol.Packet) {
+        val t = now()
+        refreshScreen(t)
+        val w = screenW
+        val h = screenH
+        if (w <= 0 || h <= 0) return
+        val x = p.x * (w - 1)
+        val y = p.y * (h - 1)
+        when (p.action) {
+            InputProtocol.DOWN -> planner.down(p.pointer, x, y, t, p.gen, if (p.pointer == LOOK_POINTER) 0 else planner.cfg.minTapMs)
+            InputProtocol.MOVE -> planner.move(p.pointer, x, y, t)
+            InputProtocol.UP -> planner.up(p.pointer, t, p.gen)
+            InputProtocol.LOOK -> {
+                planner.look(LOOK_POINTER, x, y, p.dx * h, p.dy * h, LOOK_ZONE * minOf(w, h), t)
+                handler.removeCallbacks(lookIdle)
+                handler.postDelayed(lookIdle, LOOK_IDLE_MS)
+            }
+            InputProtocol.RELEASE_ALL -> {
+                handler.removeCallbacks(lookIdle)
+                planner.releaseAll()
+            }
+            else -> return
         }
         pump()
     }
 
     private fun pump() {
-        if (inFlight || fingers.isEmpty()) return
-        val builder = GestureDescription.Builder()
-        var count = 0
-        val maxStrokes = GestureDescription.getMaxStrokeCount()
-        for (f in fingers.values) {
-            if (count >= maxStrokes) break
-            val path = Path().apply {
-                moveTo(f.lastX, f.lastY)
-                if (abs(f.x - f.lastX) > 0.5f || abs(f.y - f.lastY) > 0.5f) lineTo(f.x, f.y)
-            }
-            val cont = !f.releasing
-            val prev = f.stroke
-            val stroke = if (prev != null) prev.continueStroke(path, 0, SEGMENT_MS, cont)
-            else StrokeDescription(path, 0, SEGMENT_MS, cont)
-            f.stroke = stroke
-            f.lastX = f.x
-            f.lastY = f.y
-            builder.addStroke(stroke)
-            count++
+        if (planner.inFlight) return
+        val t = now()
+        val g = planner.plan(t)
+        if (g == null) {
+            schedule(planner.wakeAt(t), t)
+            return
         }
-        if (count == 0) return
-        inFlight = true
-        val ok = service.dispatchGesture(builder.build(), object : AccessibilityService.GestureResultCallback() {
-            override fun onCompleted(g: GestureDescription?) {
-                inFlight = false
-                finishReleased()
-                pump()
-            }
-
-            override fun onCancelled(g: GestureDescription?) {
-                inFlight = false
-                // O sistema abortou a cadeia: os dedos ainda ativos reiniciam como novo toque.
-                for (f in fingers.values) f.stroke = null
-                finishReleased()
-                pump()
-            }
-        }, handler)
+        val gesture = try {
+            build(g)
+        } catch (e: Exception) {
+            // Não deveria acontecer (coordenadas presas na tela, durações > 0). Recomeça as cadeias com recuo.
+            Log.w(TAG, "gesture inválido $g: $e")
+            planner.cancelled(t)
+            schedule(planner.wakeAt(t), t)
+            return
+        }
+        current = gesture
+        val ok = try {
+            service.dispatchGesture(gesture, callback, handler)
+        } catch (e: Exception) {
+            Log.w(TAG, "dispatchGesture: $e")
+            false
+        }
         if (!ok) {
-            inFlight = false
-            fingers.clear()
+            current = null
+            planner.dispatchFailed()
+            strokes.fill(null)
         }
     }
 
-    private fun finishReleased() {
-        val it = fingers.entries.iterator()
-        val restarts = HashMap<Int, Finger>()
-        while (it.hasNext()) {
-            val (id, f) = it.next()
-            if (f.releasing) {
-                it.remove()
-                f.restartAt?.let { (rx, ry) -> restarts[id] = Finger(rx, ry) }
+    private fun build(g: TouchPlanner.Gesture): GestureDescription {
+        val builder = GestureDescription.Builder()
+        for (s in g.segments) {
+            val path = paths[s.pointer]
+            path.rewind()
+            path.moveTo(s.fromX.toFloat(), s.fromY.toFloat())
+            if (s.toX != s.fromX || s.toY != s.fromY) path.lineTo(s.toX.toFloat(), s.toY.toFloat())
+            val prev = strokes[s.pointer]
+            val stroke = if (s.continues) {
+                checkNotNull(prev) { "sem stroke anterior para continuar (ponteiro ${s.pointer})" }
+                    .continueStroke(path, s.startMs, s.durationMs, s.willContinue)
+            } else {
+                StrokeDescription(path, s.startMs, s.durationMs, s.willContinue)
             }
+            builder.addStroke(stroke)
+            built[s.pointer] = stroke
         }
-        fingers.putAll(restarts)
+        val gesture = builder.build()
+        // Só depois de montar tudo (uma exceção acima não deixa strokes pela metade). A StrokeDescription guarda
+        // uma cópia do Path, então os Paths acima podem ser reaproveitados.
+        for (s in g.segments) {
+            strokes[s.pointer] = built[s.pointer]
+            built[s.pointer] = null
+        }
+        return gesture
+    }
+
+    private fun schedule(at: Long, t: Long) {
+        if (at == Long.MAX_VALUE) {
+            if (wakeAt != Long.MAX_VALUE) handler.removeCallbacks(wake)
+            wakeAt = Long.MAX_VALUE
+            return
+        }
+        val target = maxOf(at, t + 1)
+        if (target == wakeAt) return
+        handler.removeCallbacks(wake)
+        wakeAt = target
+        handler.postAtTime(wake, target)
     }
 
     companion object {
         const val LOOK_POINTER = 9
-        private const val SEGMENT_MS = 16L
+        private const val TAG = "TouchInjector"
         private const val LOOK_IDLE_MS = 150L
+        private const val LOOK_ZONE = 0.22f
+        private const val SCREEN_TTL_MS = 500L
+        const val MIN_DEADMAN_MS = 200L
+        const val MAX_DEADMAN_MS = 5_000L
+
+        private fun safeMaxStrokes(): Int = try {
+            GestureDescription.getMaxStrokeCount()
+        } catch (_: Throwable) {
+            10
+        }
     }
 }

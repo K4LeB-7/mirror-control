@@ -14,6 +14,7 @@ class GameAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        if (::injector.isInitialized) injector.shutdown() // reconexão do serviço: não deixa a thread antiga viva
         injector = TouchInjector(this) { screenSize() }
         instance = this
     }
@@ -27,14 +28,23 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         if (instance === this) instance = null
         RotationController.onServiceGone(this)
-        if (::injector.isInitialized) injector.releaseAll()
+        if (::injector.isInitialized) injector.shutdown()
         return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        if (::injector.isInitialized) injector.shutdown()
+        super.onDestroy()
     }
 
     @Suppress("DEPRECATION")
     private fun screenSize(): Pair<Int, Int> {
+        // DisplayManager (e não WindowManager.defaultDisplay): chamado da thread do injetor e sem contexto visual.
         val m = DisplayMetrics()
-        (getSystemService(WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay.getRealMetrics(m)
+        val dm = getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        val d = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: return 0 to 0
+        d.getRealMetrics(m)
         return m.widthPixels to m.heightPixels
     }
 

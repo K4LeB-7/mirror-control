@@ -42,7 +42,9 @@ class RtcClient(
     private var qualityHeight = 720
     private var qualityFps = 60
     private var disposed = false
-    private var warnedNoAccessibility = false
+    @Volatile private var warnedNoAccessibility = false
+    /** Há codificador VP8 por hardware? Sem ele (libvpx por software), 1080p fica limitado a 30 fps. */
+    private var hwVp8 = true
 
     // Candidatos só podem seguir DEPOIS da oferta; senão o navegador os descarta.
     private var offerSent = false
@@ -83,6 +85,11 @@ class RtcClient(
             PeerConnectionFactory.InitializationOptions.builder(ctx.applicationContext).createInitializationOptions()
         )
         val egl = EglBase.create().also { eglBase = it }
+        hwVp8 = try {
+            HardwareVideoEncoderFactory(egl.eglBaseContext, true, true).supportedCodecs.any { it.name.equals("VP8", true) }
+        } catch (_: Throwable) {
+            true // na dúvida, não limita
+        }
         factory = PeerConnectionFactory.builder()
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
@@ -175,6 +182,11 @@ class RtcClient(
     fun applyQuality(height: Int, fps: Int) {
         qualityHeight = if (height >= 1080) 1080 else 720
         qualityFps = if (fps >= 60) 60 else 30
+        // VP8 por software em 1080p60 satura a CPU do celular (quadros atrasam/engasgam e o aparelho esquenta).
+        if (!hwVp8 && qualityHeight == 1080 && qualityFps > 30) {
+            qualityFps = 30
+            onStatus("Sem VP8 por hardware: 1080p limitado a 30 fps (use 720p para 60 fps)")
+        }
         val (w, h) = captureSize()
         val format = Triple(w, h, qualityFps)
         if (format != appliedFormat) {
@@ -409,8 +421,7 @@ class RtcClient(
     private inner class InputObserver(private val ch: DataChannel) : DataChannel.Observer {
         override fun onMessage(buffer: DataChannel.Buffer) {
             if (!buffer.binary) return
-            val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
-            val packet = InputProtocol.decode(bytes) ?: return
+            val packet = InputProtocol.decode(buffer.data) ?: return // lê direto do buffer (sem cópia)
             val injector = GameAccessibilityService.instance?.injector
             if (injector == null) {
                 if (!warnedNoAccessibility) {
@@ -424,8 +435,9 @@ class RtcClient(
 
         override fun onBufferedAmountChange(previous: Long) {}
         override fun onStateChange() {
-            // Perdeu o canal de entrada: nenhum dedo pode ficar "preso" na tela.
-            if (ch.state() != DataChannel.State.OPEN) GameAccessibilityService.instance?.injector?.releaseAll()
+            val injector = GameAccessibilityService.instance?.injector ?: return
+            // Canal novo = navegador novo: zera gerações/deadman. Perdeu o canal: nenhum dedo pode ficar "preso".
+            if (ch.state() == DataChannel.State.OPEN) injector.newSession() else injector.releaseAll()
         }
     }
 
@@ -435,7 +447,10 @@ class RtcClient(
             val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
             try {
                 val msg = JSONObject(String(bytes, Charsets.UTF_8))
-                if (msg.optString("type") == "quality") {
+                if (msg.optString("type") == "input") {
+                    // Site 0.3.1+: manda keepalive dos dedos segurados → liga o "deadman" (UP perdido não prende dedo).
+                    GameAccessibilityService.instance?.injector?.setDeadman(msg.optLong("deadmanMs", 0))
+                } else if (msg.optString("type") == "quality") {
                     val h = msg.optInt("height", qualityHeight)
                     val f = msg.optInt("fps", qualityFps)
                     main.post { if (!disposed) applyQuality(h, f) }
@@ -453,7 +468,14 @@ class RtcClient(
         }
 
         override fun onBufferedAmountChange(previous: Long) {}
-        override fun onStateChange() {}
+        override fun onStateChange() {
+            // Anuncia ao site o que este app entende (o site antigo ignora tipos desconhecidos).
+            if (ch.state() == DataChannel.State.OPEN && !disposed) {
+                try {
+                    ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(InputProtocol.CAPS_JSON.toByteArray(Charsets.UTF_8)), false))
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     private open class SdpAdapter : SdpObserver {

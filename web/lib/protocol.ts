@@ -6,10 +6,14 @@
  *  1       uint8     keyId   (id do ponteiro/dedo, 0..9)
  *  2       float32   x       (0.0-1.0, relativo à largura da tela)
  *  6       float32   y       (0.0-1.0, relativo à altura da tela)
- *  10      float32   deltaX  (fração da altura da tela, só para LOOK)
+ *  10      float32   deltaX  (LOOK: fração da altura da tela; DOWN/UP: geração do toque, ver abaixo)
  *  14      float32   deltaY
  *
  * Little-endian, 18 bytes. Mesma definição em InputProtocol.kt.
+ *
+ * Entrada v2 (site e app 0.3.1+, extensão compatível): em DOWN/UP o campo deltaX leva a GERAÇÃO do toque (inteiro
+ * ≥ 1, crescente por sessão). Assim DOWN/UP podem ser repetidos (redundância contra perda no canal sem
+ * retransmissão) e um DOWN repetido com a mesma geração é keepalive. App antigo ignora deltaX em DOWN/UP.
  */
 export const Action = { DOWN: 1, MOVE: 2, UP: 3, LOOK: 4, RELEASE_ALL: 5 } as const;
 export type ActionType = (typeof Action)[keyof typeof Action];
@@ -53,7 +57,9 @@ export type CtrlMessage =
   | { type: "quality"; height: number; fps: number }
   | { type: "keyframe" }
   | { type: "rotate"; mode: RotateMode }
-  | { type: "nav"; action: NavAction };
+  | { type: "nav"; action: NavAction }
+  /** Entrada v2 (app 0.3.1+, só depois do "caps"): liga o deadman (o site manda keepalive dos dedos segurados). */
+  | { type: "input"; deadmanMs: number };
 
 /**
  * Celular → navegador (app 0.3.0+): resultado de rotate/nav, ex.:
@@ -61,11 +67,25 @@ export type CtrlMessage =
  */
 export type PhoneStatus = { type: "status"; scope: string; ok: boolean; text: string };
 
-export function parsePhoneCtrl(text: string): PhoneStatus | null {
+/** Celular → navegador (app 0.3.1+), ao abrir a conexão: `{"type":"caps","input":2}` = entende a entrada v2. */
+export type PhoneCaps = { type: "caps"; input: number };
+
+export function parsePhoneCtrl(text: string): PhoneStatus | PhoneCaps | null {
   try {
     const j = JSON.parse(text);
     if (j && j.type === "status" && typeof j.text === "string")
       return { type: "status", scope: String(j.scope ?? ""), ok: j.ok !== false, text: j.text.slice(0, 300) };
+    if (j && j.type === "caps") return { type: "caps", input: Number(j.input) || 0 };
   } catch {}
   return null;
 }
+
+/** Tempos da entrada v2 (ms). Ver docs/USB_PROTOCOLO.md, "Entrada". */
+export const INPUT_V2 = {
+  /** DOWN/UP repetidos depois deste atraso (perda de um pacote isolado não perde a borda). */
+  redundancyMs: [20, 60] as readonly number[],
+  /** Enquanto um dedo está segurado, o site reenvia DOWN(gen) (e a posição) neste intervalo. */
+  keepaliveMs: 100,
+  /** Sem keepalive/MOVE por este tempo, o celular solta o dedo sozinho (UP perdido nunca prende). */
+  deadmanMs: 500,
+};

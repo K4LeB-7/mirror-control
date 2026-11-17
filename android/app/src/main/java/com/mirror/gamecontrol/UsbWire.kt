@@ -67,6 +67,21 @@ object UsbWire {
         return out
     }
 
+    /**
+     * Mesmo quadro de [encodeVideo], lido direto do buffer de saída do MediaCodec (posição..limite): uma cópia só
+     * (sem o ByteArray intermediário por quadro). Não altera a posição de [data].
+     */
+    fun encodeVideo(type: Int, ptsUs: Long, data: java.nio.ByteBuffer): ByteArray {
+        val length = data.remaining()
+        val len = 8 + length
+        val out = ByteArray(HEADER_SIZE + len)
+        header(type, len).copyInto(out, 0)
+        val pts = if (ptsUs < 0) 0L else ptsUs
+        for (i in 0 until 8) out[HEADER_SIZE + i] = (pts ushr (8 * i)).toByte()
+        data.duplicate().get(out, HEADER_SIZE + 8, length)
+        return out
+    }
+
     fun videoPts(payload: ByteArray): Long {
         if (payload.size < 8) throw WireException("quadro de vídeo sem pts")
         var v = 0L

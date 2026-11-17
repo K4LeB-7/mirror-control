@@ -28,7 +28,11 @@ class ScreenEncoder(
     interface Listener {
         /** SPS/PPS em Annex B (pode repetir; o servidor descarta duplicatas). */
         fun onConfig(config: ByteArray)
-        fun onFrame(key: Boolean, ptsUs: Long, data: ByteArray)
+        /**
+         * Quadro codificado em [data] (posição..limite = Annex B). O buffer é do codec e só vale durante a chamada:
+         * copie o que precisar antes de retornar.
+         */
+        fun onFrame(key: Boolean, ptsUs: Long, data: java.nio.ByteBuffer)
         fun onError(e: Exception)
     }
 
@@ -135,11 +139,12 @@ class ScreenEncoder(
                     if (buf != null && info.size > 0) {
                         buf.position(info.offset)
                         buf.limit(info.offset + info.size)
-                        val bytes = ByteArray(info.size).also { buf.get(it) }
-                        if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) listener.onConfig(bytes)
-                        else listener.onFrame(
-                            info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, info.presentationTimeUs, bytes
-                        )
+                        if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                            listener.onConfig(ByteArray(info.size).also { buf.get(it) })
+                        } else {
+                            // Sem cópia intermediária: o servidor monta o quadro do protocolo direto deste buffer.
+                            listener.onFrame(info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0, info.presentationTimeUs, buf)
+                        }
                     }
                     c.releaseOutputBuffer(idx, false)
                     if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break

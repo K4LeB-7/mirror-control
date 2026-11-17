@@ -80,11 +80,11 @@ class UsbStreamServer(
             }
         }
 
-        override fun onFrame(key: Boolean, ptsUs: Long, data: ByteArray) {
+        override fun onFrame(key: Boolean, ptsUs: Long, data: java.nio.ByteBuffer) {
             val s = current ?: return
             if (synchronized(videoLock) { infoPending }) {
                 // Encoder que só manda SPS/PPS dentro do IDR (sem csd): extrai daqui para gerar INFO + CONFIG.
-                val cfg = if (key) UsbWire.parameterSets(data) else null
+                val cfg = if (key) UsbWire.parameterSets(ByteArray(data.remaining()).also { data.duplicate().get(it) }) else null
                 if (cfg != null) onConfig(cfg)
                 if (synchronized(videoLock) { infoPending }) return // sem INFO/CONFIG: o navegador não decodificaria
             }
@@ -205,6 +205,9 @@ class UsbStreamServer(
             current.also { current = session }
         }
         old?.close("REPLACED: outra aba/navegador conectou com o PIN")
+        // Navegador novo: zera gerações do injetor e anuncia a entrada v2 (o site antigo ignora o CTRL).
+        GameAccessibilityService.instance?.injector?.newSession()
+        session.send(UsbWire.CTRL, InputProtocol.CAPS_JSON.toByteArray(Charsets.UTF_8))
         session.startThreads()
         ctl.post { scheduleStart(session) }
     }
@@ -272,6 +275,7 @@ class UsbStreamServer(
                 }
             }
             "keyframe" -> encoder.requestKeyFrame()
+            "input" -> GameAccessibilityService.instance?.injector?.setDeadman(msg.optLong("deadmanMs", 0))
         }
     }
 
@@ -295,7 +299,7 @@ class UsbStreamServer(
         val queue = FrameQueue()
         private val closing = AtomicBoolean(false)
         private val finished = AtomicBoolean(false)
-        private var warnedNoAccessibility = false
+        @Volatile private var warnedNoAccessibility = false
 
         fun send(type: Int, payload: ByteArray) {
             queue.offer(FrameQueue.Item(type, UsbWire.encode(type, payload)))
