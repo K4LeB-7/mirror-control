@@ -20,7 +20,10 @@ export type ActionType = (typeof Action)[keyof typeof Action];
 
 export const PACKET_SIZE = 18;
 
-/** Ponteiros reservados: 0 joystick, 1..7 botões, 8 toque do mouse no modo livre (e rolagem), 9 câmera. */
+/**
+ * Ponteiros: 0 joystick, 1..7 botões (atribuídos no aperto, ver pointerPool.ts: até 20 botões por layout, no máximo 7
+ * pressionados ao mesmo tempo), 8 toque do mouse no modo livre (e rolagem), 9 câmera. O Android injeta até 10 dedos.
+ */
 export const POINTER_JOYSTICK = 0;
 export const POINTER_MOUSE = 8;
 export const POINTER_LOOK = 9;

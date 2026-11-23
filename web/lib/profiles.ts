@@ -16,6 +16,7 @@ import {
   clamp01,
   clampTo,
   defaultLayout,
+  freeSpot,
   keyBind,
   keyLabel,
   mouseBind,
@@ -93,17 +94,16 @@ function sanitizeLook(raw: unknown, d: Look): Look {
 }
 
 /**
- * Botões: aceita o formato novo (bind/mode/pointer/size) e o antigo (key/mouse, ponteiro = índice + 1).
- * Garante no máximo 7, ids únicos e ponteiros únicos em 1..7 (os válidos são mantidos; os demais recebem o menor livre).
+ * Botões: aceita o formato novo (bind/mode/size) e o antigo (key/mouse). No máximo MAX_BUTTONS (20; o resto é
+ * cortado), ids únicos. O campo `pointer` dos perfis até 0.3.2 (ponteiro fixo 1..7) é ignorado e removido: o
+ * ponteiro agora é atribuído na hora do aperto (lib/pointerPool.ts). Nada mais do botão se perde.
  */
-function sanitizeButtons(raw: unknown, legacyPointers: boolean): ButtonControl[] {
+function sanitizeButtons(raw: unknown): ButtonControl[] {
   const list = Array.isArray(raw) ? raw.slice(0, MAX_BUTTONS) : [];
   const out: ButtonControl[] = [];
   const ids = new Set<string>();
-  const used = new Set<number>();
-  const pending: { b: ButtonControl; want: number }[] = [];
-  list.forEach((r, i) => {
-    if (!r || typeof r !== "object") return;
+  for (const r of list) {
+    if (!r || typeof r !== "object") continue;
     const o = r as Record<string, unknown>;
     let bind: Bind | undefined;
     if (isValidBind(o.bind)) bind = o.bind;
@@ -112,49 +112,27 @@ function sanitizeButtons(raw: unknown, legacyPointers: boolean): ButtonControl[]
     let id = str(o.id, "", 64) || newId("b");
     while (ids.has(id)) id = newId("b");
     ids.add(id);
-    const b: ButtonControl = {
+    out.push({
       id,
       label: str(o.label, "Botão", 24),
       ...(bind ? { bind } : {}),
       mode: MODES.includes(o.mode as ButtonMode) ? (o.mode as ButtonMode) : "hold",
-      pointer: 0,
       x: clamp01(num(o.x, 0.5)),
       y: clamp01(num(o.y, 0.5)),
       size: clampTo(num(o.size, BUTTON_SIZE.default), BUTTON_SIZE.min, BUTTON_SIZE.max),
-    };
-    const want = legacyPointers ? i + 1 : num(o.pointer, 0);
-    pending.push({ b, want });
-  });
-  for (const p of pending) {
-    if (Number.isInteger(p.want) && p.want >= 1 && p.want <= MAX_BUTTONS && !used.has(p.want)) {
-      p.b.pointer = p.want;
-      used.add(p.want);
-    }
-  }
-  for (const p of pending) {
-    if (!p.b.pointer) {
-      p.b.pointer = freePointer(used);
-      used.add(p.b.pointer);
-    }
-    out.push(p.b);
+    });
   }
   return out;
-}
-
-function freePointer(used: Set<number>): number {
-  for (let i = 1; i <= MAX_BUTTONS; i++) if (!used.has(i)) return i;
-  return 0;
 }
 
 export function sanitizeLayout(raw: unknown, o: Orientation): Layout {
   const d = defaultLayout(o);
   if (!raw || typeof raw !== "object") return d;
   const r = raw as Record<string, unknown>;
-  const legacy = Array.isArray(r.buttons) && r.buttons.some((b) => b && typeof b === "object" && !("pointer" in b));
   return {
     joystick: sanitizeJoystick(r.joystick, d.joystick),
     look: sanitizeLook(r.look, d.look),
-    buttons: "buttons" in r ? sanitizeButtons(r.buttons, legacy) : d.buttons,
+    buttons: "buttons" in r ? sanitizeButtons(r.buttons) : d.buttons,
     ...(r.confirmed === true ? { confirmed: true } : {}),
   };
 }
@@ -201,7 +179,7 @@ export function loadStore(kv: KV | null | undefined): ProfileStore {
 
 /**
  * Formato v1 → v2: o layout antigo (feito para paisagem) vira o layout de PAISAGEM do perfil "Padrão" e conta como
- * personalizado; o de retrato começa no padrão novo. Ponteiros = índice + 1, como o app antigo enviava.
+ * personalizado; o de retrato começa no padrão novo.
  */
 export function migrateLegacy(old: unknown): ProfileStore {
   const store = defaultStore();
@@ -272,11 +250,18 @@ export function exportProfile(p: Profile): string {
   return JSON.stringify({ format: EXPORT_TAG, version: 2, profile: rest }, null, 2);
 }
 
+/** Quantos botões um layout cru (antes do saneamento) tem além do limite. */
+function overflowOf(raw: unknown): number {
+  const b = raw && typeof raw === "object" ? (raw as Record<string, unknown>).buttons : undefined;
+  return Array.isArray(b) ? Math.max(0, b.length - MAX_BUTTONS) : 0;
+}
+
 /**
  * Importa o texto de exportProfile (ou só o objeto do perfil, ou um layout v1 antigo). O perfil importado ganha id
- * novo, nome único e vira o ativo. Lança Error com mensagem em português se o texto não servir.
+ * novo, nome único e vira o ativo. Lança Error com mensagem em português se o texto não servir. `warnings`: o que
+ * foi ajustado (ex.: layout com mais de MAX_BUTTONS botões, cortado).
  */
-export function importProfile(s: ProfileStore, text: string): ProfileStore {
+export function importProfileWithReport(s: ProfileStore, text: string): { store: ProfileStore; warnings: string[] } {
   let j: unknown;
   try {
     j = JSON.parse(text);
@@ -290,23 +275,49 @@ export function importProfile(s: ProfileStore, text: string): ProfileStore {
   else if ("landscape" in o || "portrait" in o) raw = o;
   else if ("joystick" in o || "buttons" in o) raw = { name: "Importado (v1)", landscape: o };
   else throw new Error("JSON não parece um perfil do Mirror Control.");
+  const warnings: string[] = [];
+  for (const [k, name] of [
+    ["landscape", "paisagem"],
+    ["portrait", "retrato"],
+  ] as const) {
+    const extra = overflowOf(raw[k]);
+    if (extra > 0)
+      warnings.push(`O layout de ${name} tinha ${MAX_BUTTONS + extra} botões: só os ${MAX_BUTTONS} primeiros foram importados (limite de ${MAX_BUTTONS}).`);
+  }
   const p = sanitizeProfile({ ...raw, id: newId() }, "Importado");
   p.name = uniqueName(s, p.name);
-  return { ...s, activeId: p.id, profiles: [...s.profiles, p] };
+  return { store: { ...s, activeId: p.id, profiles: [...s.profiles, p] }, warnings };
+}
+
+/** Como importProfileWithReport, só o armazenamento novo. */
+export function importProfile(s: ProfileStore, text: string): ProfileStore {
+  return importProfileWithReport(s, text).store;
 }
 
 // ---------------------------------------------------------------- botões
 
-/** Menor ponteiro livre (1..7) do layout, ou 0 se já há 7 botões. */
-export function nextPointer(l: Layout): number {
-  return freePointer(new Set(l.buttons.map((b) => b.pointer)));
+/** Rótulo padrão de um botão novo: "Botão N" (N = posição do botão novo na lista, sem repetir um rótulo). */
+export function nextButtonLabel(l: Layout): string {
+  const labels = new Set(l.buttons.map((b) => b.label));
+  for (let n = l.buttons.length + 1; ; n++) if (!labels.has(`Botão ${n}`)) return `Botão ${n}`;
 }
 
-export function addButton(l: Layout, x: number, y: number, label = "Novo"): { layout: Layout; id?: string } {
-  const pointer = nextPointer(l);
-  if (!pointer || l.buttons.length >= MAX_BUTTONS) return { layout: l };
+/**
+ * Botão novo ("+ Botão"): no ponto pedido se estiver livre, senão na posição livre mais próxima (lib/layout.ts,
+ * freeSpot), para botões criados em sequência não nascerem empilhados. Recusa (sem id) no limite de MAX_BUTTONS.
+ */
+export function addButton(
+  l: Layout,
+  x?: number | null,
+  y?: number | null,
+  label?: string,
+  aspect = 16 / 9
+): { layout: Layout; id?: string } {
+  if (l.buttons.length >= MAX_BUTTONS) return { layout: l };
   const id = newId("b");
-  const b: ButtonControl = { id, label, mode: "tap", pointer, x: clamp01(x), y: clamp01(y), size: BUTTON_SIZE.default };
+  const want = typeof x === "number" && typeof y === "number" ? { x, y } : undefined;
+  const at = freeSpot(l, aspect, BUTTON_SIZE.default, want);
+  const b: ButtonControl = { id, label: label ?? nextButtonLabel(l), mode: "tap", x: at.x, y: at.y, size: BUTTON_SIZE.default };
   return { layout: { ...l, buttons: [...l.buttons, b] }, id };
 }
 

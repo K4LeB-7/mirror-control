@@ -5,6 +5,7 @@ import type { ButtonControl, ButtonMode, Layout } from "./layout.ts";
 import { isEditableTarget, wheelSwipe } from "./mouseModes.ts";
 import type { MouseMode, Point } from "./mouseModes.ts";
 import type { UiSettings } from "./profiles.ts";
+import { PointerPool } from "./pointerPool.ts";
 
 /** O que o controlador precisa de uma sessão (WebRTC `RemoteSession` ou USB `UsbSession`). */
 export type InputSink = {
@@ -34,7 +35,17 @@ export type InputHooks = {
   pointAt(e: MouseEvent, clamp: boolean): Point | null;
   onToggleMode(): void;
   onEscape(): void;
+  /**
+   * Um botão foi ignorado porque já há 7 botões pressionados (limite de toques simultâneos do Android). Chamado no
+   * máximo uma vez a cada [LIMIT_NOTICE_MS] (aviso discreto, não repetitivo).
+   */
+  onTouchLimit?(): void;
+  /** Relógio em ms (padrão performance.now; os testes usam um relógio falso). */
+  now?(): number;
 };
+
+/** Intervalo mínimo entre dois avisos de "limite de toques simultâneos". */
+export const LIMIT_NOTICE_MS = 4000;
 
 /** "Toque rápido": DOWN e, depois deste tempo FIXO, UP (não depende de quando a tecla é solta). */
 export const TAP_MS = 60;
@@ -42,6 +53,7 @@ const STEP_MS = 16;
 /** Bits de MouseEvent.buttons por MouseEvent.button (0 esquerdo, 1 meio, 2 direito). */
 const BUTTON_BITS = [1, 4, 2];
 
+/** Botão pressionado: o ponteiro que ele RECEBEU do pool no DOWN (o UP vai sempre para este ponteiro). */
 type Active = { pointer: number; mode: ButtonMode; source: string };
 /** Dedo pressionado: geração do DOWN, ponto do DOWN e posição atual (joystick/arrasto). */
 type Held = { gen: number; x: number; y: number; mx: number; my: number; movedSinceKeepalive: boolean };
@@ -50,6 +62,10 @@ type Held = { gen: number; x: number; y: number; mx: number; my: number; movedSi
  * Converte teclado + mouse em pacotes de toque de 18 bytes.
  * Modo livre: mouse = dedo (ponteiro 8), roda = swipe, direito = Voltar. Modo travado: movimento = LOOK (9),
  * botões/roda = controles mapeados. Teclas mapeadas nos dois modos (no livre, se a opção estiver ligada).
+ *
+ * Botões (até 20 por layout) não têm ponteiro fixo: no aperto recebem o menor ponteiro livre de 1..7
+ * ([PointerPool]) e o devolvem ao soltar. Com 7 botões já pressionados, um 8º aperto é ignorado (nada é enviado,
+ * nenhum dedo é "roubado", e soltar essa tecla depois não manda nada) e `onTouchLimit` avisa.
  *
  * Garantias: todo DOWN tem um UP (soltar a tecla/botão, ou blur/aba escondida/menu de contexto/troca de modo/
  * detach → releaseAll); o UP vai para o ponteiro que foi pressionado, mesmo se o layout mudou no meio. Entrada v2
@@ -62,6 +78,8 @@ export class InputController {
   private timers = new Set<ReturnType<typeof setTimeout>>(); // toques rápidos e swipes
   private echoes = new Set<ReturnType<typeof setTimeout>>(); // cópias redundantes de DOWN/UP (v2)
   private held = new Map<number, Held>(); // ponteiro -> dedo pressionado
+  private pool = new PointerPool(); // ponteiros 1..7 dos botões
+  private lastLimitNotice = -Infinity;
   private gen = 0;
   private v2 = false;
   private keepTimer: ReturnType<typeof setInterval> | null = null;
@@ -78,7 +96,7 @@ export class InputController {
   private wheelQueue: { at: Point; dx: number; dy: number; mode: number } | null = null;
 
   /** Contadores (diagnóstico/testes/medições). */
-  readonly stats = { sent: 0, deferred: 0 };
+  readonly stats = { sent: 0, deferred: 0, limitHits: 0 };
 
   private session: InputSink;
   private h: InputHooks;
@@ -143,10 +161,20 @@ export class InputController {
     return [...this.held.keys()];
   }
 
+  /** Botões pressionados agora → ponteiro que cada um recebeu (testes/diagnóstico). */
+  activeButtons(): Record<string, number> {
+    return Object.fromEntries([...this.active].map(([id, a]) => [id, a.pointer]));
+  }
+
+  private now() {
+    return this.h.now ? this.h.now() : typeof performance !== "undefined" ? performance.now() : Date.now();
+  }
+
   /** Solta todos os dedos (troca de modo, perda de foco, editor aberto, rotação…). */
   releaseAll = () => {
     this.down.clear();
     this.active.clear();
+    this.pool.releaseAll(this.now());
     this.timers.forEach(clearTimeout);
     this.timers.clear();
     this.joyActive = false;
@@ -493,7 +521,6 @@ export class InputController {
 
   /** Aperto de uma tecla/botão do mouse (`source`) atribuído a `b`. Devolve true se tratou. */
   private pressBind(b: ButtonControl, source: string): boolean {
-    if (!b.pointer) return false;
     if (b.mode === "tap" || b.bind?.startsWith("wheel:")) {
       this.tap(b);
       return true;
@@ -514,22 +541,37 @@ export class InputController {
 
   /** Toque rápido: DOWN agora e UP depois de TAP_MS fixos, não importa quando a tecla for solta. */
   private tap(b: ButtonControl) {
-    if (!b.pointer || this.active.has(b.id)) return;
-    this.pressButton(b, "tap");
-    this.later(TAP_MS, () => this.release(b.id));
+    if (this.active.has(b.id)) return;
+    if (this.pressButton(b, "tap")) this.later(TAP_MS, () => this.release(b.id));
   }
 
-  private pressButton(b: ButtonControl, source: string) {
-    this.active.set(b.id, { pointer: b.pointer, mode: b.mode === "toggle" ? "toggle" : b.mode === "hold" && source !== "tap" ? "hold" : "tap", source });
-    this.press(b.pointer, b.x, b.y);
+  /**
+   * Pega um ponteiro do pool e encosta. Sem ponteiro livre (7 botões já pressionados): não envia nada, não marca o
+   * botão como pressionado (o keyup/2º aperto não manda UP sem DOWN) e avisa (no máximo a cada LIMIT_NOTICE_MS).
+   */
+  private pressButton(b: ButtonControl, source: string): boolean {
+    const now = this.now();
+    const pointer = this.pool.acquire(now);
+    if (pointer === null) {
+      this.stats.limitHits++;
+      if (now - this.lastLimitNotice >= LIMIT_NOTICE_MS) {
+        this.lastLimitNotice = now;
+        this.h.onTouchLimit?.();
+      }
+      return false;
+    }
+    this.active.set(b.id, { pointer, mode: b.mode === "toggle" ? "toggle" : b.mode === "hold" && source !== "tap" ? "hold" : "tap", source });
+    this.press(pointer, b.x, b.y);
+    return true;
   }
 
   private release(id: string) {
     const a = this.active.get(id);
     if (!a) return;
     this.active.delete(id);
-    // Outro controle pode estar usando o mesmo dedo agora (layout trocado): só levanta se ainda é este.
-    if (![...this.active.values()].some((x) => x.pointer === a.pointer)) this.lift(a.pointer);
+    // O ponteiro foi dado só a este botão (pool): levanta e devolve.
+    this.lift(a.pointer);
+    this.pool.release(a.pointer, this.now());
   }
 
   // ---------------------------------------------------------------- joystick

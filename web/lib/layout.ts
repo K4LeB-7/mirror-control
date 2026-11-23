@@ -22,8 +22,11 @@ export type ButtonControl = {
   label: string;
   bind?: Bind;
   mode: ButtonMode;
-  /** Ponteiro (dedo) do protocolo, 1..7. Fixo por controle: apagar outro botão não muda este. */
-  pointer: number;
+  /**
+   * OBSOLETO (site até 0.3.2: ponteiro fixo 1..7 por botão). Ignorado: o ponteiro agora é pego de um pool quando o
+   * botão é pressionado (lib/pointerPool.ts). Perfis antigos que ainda o têm abrem normalmente; o saneamento o remove.
+   */
+  pointer?: number;
   x: number;
   y: number;
   /** Diâmetro em fração do lado menor da tela. */
@@ -65,34 +68,37 @@ export type Layout = {
   confirmed?: boolean;
 };
 
-/** Ponteiros: 0 joystick, 1..7 botões, 8 toque do mouse (modo livre) e rolagem, 9 câmera. */
-export const MAX_BUTTONS = 7;
+/**
+ * Botões por layout (por perfil e orientação). Não confundir com os botões pressionados AO MESMO TEMPO: no máximo 7
+ * (ponteiros 1..7, atribuídos na hora do aperto; 0 joystick, 8 mouse livre, 9 câmera — ver lib/pointerPool.ts).
+ */
+export const MAX_BUTTONS = 20;
 export const POINTER_MOUSE = 8;
 
 export const BUTTON_SIZE = { min: 0.06, max: 0.35, default: 0.15 };
 export const JOY_RADIUS = { min: 0.05, max: 0.35 };
 export const JOY_SIZE = { min: 0.12, max: 0.7 };
 
-const btn = (
-  id: string,
-  label: string,
-  bind: Bind,
-  pointer: number,
-  x: number,
-  y: number,
-  size: number
-): ButtonControl => ({ id, label, bind, mode: "hold", pointer, x, y, size });
+const btn = (id: string, label: string, bind: Bind, x: number, y: number, size: number): ButtonControl => ({
+  id,
+  label,
+  bind,
+  mode: "hold",
+  x,
+  y,
+  size,
+});
 
 /** Paisagem: joystick à esquerda, ações à direita. Sem sobreposição de 16:9 a 21:9 (ver tests/ui.test.ts). */
 export const DEFAULT_LANDSCAPE: Layout = {
   joystick: { enabled: true, x: 0.14, y: 0.68, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
   look: { enabled: true, x: 0.62, y: 0.45, sensX: 1, sensY: 1, invertY: false },
   buttons: [
-    btn("fire", "Atirar", "mouse:0", 1, 0.86, 0.6, 0.15),
-    btn("aim", "Mirar", "mouse:2", 2, 0.76, 0.42, 0.15),
-    btn("jump", "Pular", "key:Space", 3, 0.93, 0.8, 0.15),
-    btn("crouch", "Agachar", "key:KeyC", 4, 0.82, 0.84, 0.15),
-    btn("reload", "Recarregar", "key:KeyR", 5, 0.7, 0.84, 0.15),
+    btn("fire", "Atirar", "mouse:0", 0.86, 0.6, 0.15),
+    btn("aim", "Mirar", "mouse:2", 0.76, 0.42, 0.15),
+    btn("jump", "Pular", "key:Space", 0.93, 0.8, 0.15),
+    btn("crouch", "Agachar", "key:KeyC", 0.82, 0.84, 0.15),
+    btn("reload", "Recarregar", "key:KeyR", 0.7, 0.84, 0.15),
   ],
 };
 
@@ -101,11 +107,11 @@ export const DEFAULT_PORTRAIT: Layout = {
   joystick: { enabled: true, x: 0.25, y: 0.8, radius: 0.16, size: 0.36, up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD" },
   look: { enabled: true, x: 0.5, y: 0.45, sensX: 1, sensY: 1, invertY: false },
   buttons: [
-    btn("fire", "Atirar", "mouse:0", 1, 0.8, 0.74, 0.17),
-    btn("aim", "Mirar", "mouse:2", 2, 0.62, 0.66, 0.17),
-    btn("jump", "Pular", "key:Space", 3, 0.86, 0.86, 0.17),
-    btn("crouch", "Agachar", "key:KeyC", 4, 0.66, 0.92, 0.17),
-    btn("reload", "Recarregar", "key:KeyR", 5, 0.86, 0.62, 0.17),
+    btn("fire", "Atirar", "mouse:0", 0.8, 0.74, 0.17),
+    btn("aim", "Mirar", "mouse:2", 0.62, 0.66, 0.17),
+    btn("jump", "Pular", "key:Space", 0.86, 0.86, 0.17),
+    btn("crouch", "Agachar", "key:KeyC", 0.66, 0.92, 0.17),
+    btn("reload", "Recarregar", "key:KeyR", 0.86, 0.62, 0.17),
   ],
 };
 
@@ -249,3 +255,45 @@ export function overlappingControls(layout: Layout, w: number, h: number): [stri
 
 export const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 export const clampTo = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+// ---------------------------------------------------------------- posição de um botão novo
+
+/** Tamanho de referência (px) de um vídeo com a proporção `aspect`: lado menor = 1000. */
+function refSize(aspect: number) {
+  const a = aspect > 0 && Number.isFinite(aspect) ? aspect : 16 / 9;
+  return a >= 1 ? { w: 1000 * a, h: 1000 } : { w: 1000, h: 1000 / a };
+}
+
+/**
+ * Onde um botão novo (diâmetro `size`) deve nascer, para botões criados em sequência não ficarem empilhados:
+ * - o ponto pedido (`want`, o clique no vídeo), se ali o botão não encosta em nenhum controle;
+ * - senão (ou sem ponto pedido), o centro livre mais próximo numa grade que cobre a tela (dentro da tela);
+ * - tela sem espaço livre: o ponto pedido (ou o centro) com um deslocamento escalonado pelo número de botões.
+ */
+export function freeSpot(layout: Layout, aspect: number, size = BUTTON_SIZE.default, want?: { x: number; y: number }) {
+  const { w, h } = refSize(aspect);
+  const d = size * Math.min(w, h);
+  const gap = d * 0.08;
+  const boxes = controlBoxes(layout, w, h).map((b) => b.rect);
+  const rectAt = (cx: number, cy: number): Rect => ({ left: cx - d / 2, top: cy - d / 2, width: d, height: d });
+  const free = (r: Rect) => !boxes.some((b) => rectsOverlap(r, b, gap));
+  const tx = (want ? clamp01(want.x) : 0.5) * w;
+  const ty = (want ? clamp01(want.y) : 0.5) * h;
+  if (want && free(rectAt(tx, ty))) return { x: clamp01(want.x), y: clamp01(want.y) };
+  const step = d + gap;
+  const cols = Math.max(1, Math.floor(w / step));
+  const rows = Math.max(1, Math.floor(h / step));
+  const ox = (w - cols * step) / 2 + step / 2;
+  const oy = (h - rows * step) / 2 + step / 2;
+  const cells: { x: number; y: number; dist: number }[] = [];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const x = ox + c * step;
+      const y = oy + r * step;
+      cells.push({ x, y, dist: Math.hypot(x - tx, y - ty) });
+    }
+  cells.sort((a, b) => a.dist - b.dist || a.y - b.y || a.x - b.x);
+  for (const c of cells) if (free(rectAt(c.x, c.y))) return { x: c.x / w, y: c.y / h };
+  const k = (layout.buttons.length % 8) + 1;
+  return { x: clampTo(tx / w + 0.04 * k, 0.05, 0.95), y: clampTo(ty / h + 0.04 * k, 0.05, 0.95) };
+}

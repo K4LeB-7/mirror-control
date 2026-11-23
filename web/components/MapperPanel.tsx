@@ -1,5 +1,5 @@
 "use client";
-import { memo, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { blurAfterMouseClick } from "./Toolbar";
 import {
   BUTTON_SIZE,
@@ -24,11 +24,12 @@ import {
   duplicateProfile,
   exportProfile,
   findConflicts,
-  importProfile,
+  importProfileWithReport,
   renameProfile,
   reservedBinds,
   selectProfile,
 } from "@/lib/profiles";
+import { MAX_SIMULTANEOUS_BUTTONS } from "@/lib/pointerPool";
 
 export type JoyDir = "up" | "down" | "left" | "right";
 /** O que está esperando "pressione uma tecla ou botão do mouse". */
@@ -69,6 +70,7 @@ const btn =
 const field = "w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1";
 const ORIENT = { portrait: "Retrato", landscape: "Paisagem" } as const;
 const MODE_TEXT: Record<ButtonMode, string> = { hold: "Segurar", toggle: "Alternar (liga/desliga)", tap: "Toque rápido" };
+const MODE_MARK: Record<ButtonMode, string> = { hold: "", toggle: " ⇄", tap: " •" };
 const DIRS: [JoyDir, string][] = [
   ["up", "↑ Cima"],
   ["left", "← Esq."],
@@ -115,6 +117,23 @@ export default memo(function MapperPanel(p: Props) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pasting, setPasting] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const rootRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+
+  // Com até 22 controles a lista rola sozinha: o selecionado (no vídeo ou na lista) fica visível nela, e o editor
+  // dele (abaixo da lista) entra na área visível do painel.
+  useEffect(() => {
+    const id = p.selected;
+    const ul = listRef.current;
+    if (!id || !ul) return;
+    const li = [...ul.children].find((c) => c.querySelector(`[data-testid="list-${CSS.escape(id)}"]`)) as HTMLElement | undefined;
+    if (li) {
+      if (li.offsetTop < ul.scrollTop) ul.scrollTop = li.offsetTop;
+      else if (li.offsetTop + li.offsetHeight > ul.scrollTop + ul.clientHeight) ul.scrollTop = li.offsetTop + li.offsetHeight - ul.clientHeight;
+    }
+    const ed = rootRef.current?.querySelector('[data-testid="button-editor"], [data-testid="joystick-editor"], [data-testid="look-editor"]');
+    ed?.scrollIntoView?.({ block: "nearest" });
+  }, [p.selected]);
 
   const conflicts = findConflicts(l, reservedBinds(p.settings.toggleKey));
   const conflictBinds = new Set(conflicts.map((c) => c.bind));
@@ -125,8 +144,10 @@ export default memo(function MapperPanel(p: Props) {
   const say = (text: string, ok = true) => setMsg({ text, ok });
   const doImport = (text: string) => {
     try {
-      p.onStore(importProfile(p.store, text));
-      say("Perfil importado e ativado.");
+      const r = importProfileWithReport(p.store, text);
+      p.onStore(r.store);
+      if (r.warnings.length) say(`Perfil importado e ativado. ${r.warnings.join(" ")}`, false);
+      else say("Perfil importado e ativado.");
       setPasting(null);
     } catch (e) {
       say(e instanceof Error ? e.message : String(e), false);
@@ -154,6 +175,7 @@ export default memo(function MapperPanel(p: Props) {
 
   return (
     <aside
+      ref={rootRef}
       data-testid="mapper-panel"
       onClick={blurAfterMouseClick}
       className="flex max-h-[45vh] w-full shrink-0 flex-col overflow-hidden border-t border-zinc-800 bg-zinc-950 text-xs text-zinc-200 md:max-h-none md:w-[340px] md:border-l md:border-t-0"
@@ -177,7 +199,7 @@ export default memo(function MapperPanel(p: Props) {
             <ol className="list-decimal space-y-0.5 pl-4 text-sky-100">
               <li>Arraste o joystick e os botões para cima dos controles do jogo no vídeo.</li>
               <li>Clique num controle e em <b>Atalho</b>: aperte a tecla ou o botão do mouse.</li>
-              <li><b>+ Botão</b> e clique no vídeo para criar outro. <b>Concluir</b> salva.</li>
+              <li><b>+ Botão</b> e clique no vídeo para criar outro (até {MAX_BUTTONS}). <b>Concluir</b> salva.</li>
             </ol>
           </div>
         )}
@@ -337,7 +359,7 @@ export default memo(function MapperPanel(p: Props) {
               data-testid="add-button"
               className={`${btn} ${p.placing?.kind === "new" ? "border-amber-300 bg-amber-700" : ""}`}
               disabled={full}
-              title={full ? `Limite de ${MAX_BUTTONS} botões` : "Depois clique no vídeo onde o botão deve ficar"}
+              title={full ? `Limite de ${MAX_BUTTONS} botões por layout: exclua um para criar outro` : "Depois clique no vídeo onde o botão deve ficar"}
               onClick={() => p.onPlacing(p.placing?.kind === "new" ? null : { kind: "new" })}
             >
               {p.placing?.kind === "new" ? "Clique no vídeo…" : "+ Botão"}
@@ -366,10 +388,15 @@ export default memo(function MapperPanel(p: Props) {
             >
               Limpar tudo
             </button>
-            <span className="self-center text-zinc-500">
+            <span data-testid="button-count" className={`self-center ${full ? "text-amber-300" : "text-zinc-500"}`}>
               {l.buttons.length}/{MAX_BUTTONS} botões
             </span>
           </div>
+          {full && (
+            <p data-testid="button-limit" className="mb-2 text-amber-300">
+              Limite de {MAX_BUTTONS} botões neste layout: exclua um para criar outro.
+            </p>
+          )}
 
           {conflicts.length > 0 && (
             <div data-testid="conflicts" className="mb-2 rounded-md border border-amber-600 bg-amber-950 p-2 text-amber-100">
@@ -380,13 +407,13 @@ export default memo(function MapperPanel(p: Props) {
             </div>
           )}
 
-          <ul className="space-y-1" data-testid="control-list">
+          <ul ref={listRef} className="relative max-h-72 space-y-1 overflow-y-auto overscroll-contain pr-0.5" data-testid="control-list">
             {[
               ...(l.joystick.enabled
                 ? [{ id: "joystick", name: "Joystick", info: [l.joystick.up, l.joystick.left, l.joystick.down, l.joystick.right].map(keyLabel).join("") }]
                 : []),
               ...(l.look.enabled ? [{ id: "look", name: "Câmera (mouse travado)", info: `sens. ${l.look.sensX.toFixed(1)}/${l.look.sensY.toFixed(1)}` }] : []),
-              ...l.buttons.map((b) => ({ id: b.id, name: b.label, info: `${bindLabel(b.bind)} · dedo ${b.pointer}`, warn: !b.bind || conflictBinds.has(b.bind ?? "") })),
+              ...l.buttons.map((b) => ({ id: b.id, name: b.label, info: `${bindLabel(b.bind)}${MODE_MARK[b.mode]}`, warn: !b.bind || conflictBinds.has(b.bind ?? "") })),
             ].map((c) => (
               <li key={c.id} className="flex gap-1">
                 <button
@@ -420,6 +447,11 @@ export default memo(function MapperPanel(p: Props) {
           <p className="mt-2 text-zinc-500">
             Arraste no vídeo ou use as setas (Shift = passo maior). Delete (ou ✕) exclui o controle selecionado; Ctrl+Z
             desfaz.
+          </p>
+          <p data-testid="simultaneous-hint" className="mt-1 text-zinc-500">
+            Até {MAX_BUTTONS} botões por layout, mas o Android aceita no máximo {MAX_SIMULTANEOUS_BUTTONS} apertados ao
+            mesmo tempo (além do joystick, da câmera e do mouse). Botões <b>Alternar</b> ligados ocupam um desses{" "}
+            {MAX_SIMULTANEOUS_BUTTONS} toques. ⇄ = alternar, • = toque rápido.
           </p>
         </Section>
 
@@ -467,9 +499,14 @@ export default memo(function MapperPanel(p: Props) {
                 ))}
               </select>
             </label>
+            {selBtn.mode === "toggle" && (
+              <div data-testid="toggle-note" className="mb-2 text-zinc-500">
+                Enquanto ligado, este botão ocupa um dos {MAX_SIMULTANEOUS_BUTTONS} toques simultâneos do Android.
+              </div>
+            )}
             <Range label="Tamanho" value={selBtn.size} min={BUTTON_SIZE.min} max={BUTTON_SIZE.max} step={0.01} onChange={(v) => updBtn(selBtn.id, { size: v })} />
             <div className="mb-1 text-zinc-500">
-              Posição: {(selBtn.x * 100).toFixed(1)}% × {(selBtn.y * 100).toFixed(1)}% · dedo {selBtn.pointer}
+              Posição: {(selBtn.x * 100).toFixed(1)}% × {(selBtn.y * 100).toFixed(1)}%
             </div>
             <div className="flex flex-wrap gap-1">
               <button className={btn} onClick={() => p.onPlacing({ kind: "move", id: selBtn.id })}>

@@ -87,9 +87,27 @@ com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou 
   (Esc cancela). Atalhos repetidos (inclusive com F8/Esc) aparecem em amarelo. Botões do mouse só disparam controles
   com o mouse travado.
 - **Tipo do botão**: Segurar (dedo fica enquanto a tecla está apertada), Alternar (1º aperto encosta, 2º solta) ou
-  Toque rápido. Até **7 botões** por layout; cada um usa sempre o mesmo dedo, mesmo que outro seja apagado.
+  Toque rápido. Até **20 botões** por layout (veja "20 botões e 7 toques ao mesmo tempo" abaixo).
 - **Joystick**: 4 teclas, raio do arrasto e tamanho do círculo. **Câmera**: sensibilidade X/Y, inverter Y e âncora.
 - **Mostrar controles** (barra) e **Opacidade** (painel → Opções) deixam os controles mais discretos.
+
+### 20 botões e 7 toques ao mesmo tempo (site 0.3.3)
+- Cada layout (perfil × retrato/paisagem) aceita até **20 botões**. O painel mostra **n/20 botões**; no 20º o
+  **+ Botão** fica desabilitado com a explicação (exclua um para criar outro). Botões novos se chamam "Botão N" e
+  nascem no ponto clicado; se ali já há um controle, vão para a posição livre mais próxima (clicar várias vezes no
+  mesmo ponto não empilha botões). A lista do painel rola sozinha e o editor do botão selecionado fica à vista.
+- O Android injeta no máximo 10 dedos ao mesmo tempo: 1 do joystick, 1 da câmera, 1 do mouse livre e **7 para os
+  botões**. Por isso, dos 20 botões, no máximo **7 podem estar apertados ao mesmo tempo**. Isso é limite do Android,
+  não do site. O dedo de um botão não é mais fixo: é escolhido quando você aperta e devolvido quando solta.
+- Apertar um 8º botão com 7 já apertados não faz nada (nenhum dedo é "roubado" de outro botão) e a barra mostra
+  **"⚠ Limite de 7 toques simultâneos do Android"** (no máximo uma vez a cada 4 s). Soltar um botão não dispara
+  depois o que foi ignorado: solte e aperte a tecla de novo.
+- Botões **Alternar** ligados contam como apertados: 3 alternar ligados deixam 4 toques para os outros botões.
+  **Toque rápido** e a roda ocupam um dedo só por ~60 ms.
+- Perfis e arquivos exportados antes da 0.3.3 abrem iguais (o campo antigo `pointer` é ignorado). Importar um JSON
+  com mais de 20 botões num layout importa os 20 primeiros e avisa.
+- Voltar a uma versão antiga do site com um perfil de mais de 7 botões: o site antigo só lê os 7 primeiros (e grava
+  assim). Exporte o perfil antes se precisar.
 
 ### Toques e cliques (app e site 0.3.1)
 - **Clique curto agora é clique**: até a 0.3.0, um clique de tecla/mouse muitas vezes ficava "segurando" no jogo (o

@@ -8,6 +8,7 @@ import {
   bindLabel,
   controlBoxes,
   fitContain,
+  freeSpot,
   joystickOffset,
   orientationFor,
   overlappingControls,
@@ -26,6 +27,8 @@ import {
   exportProfile,
   findConflicts,
   importProfile,
+  importProfileWithReport,
+  nextButtonLabel,
   loadSettings,
   loadStore,
   removeButton,
@@ -73,15 +76,15 @@ test("migração do formato antigo v1: vira o layout de PAISAGEM do perfil Padr�
   assert.equal(l.look.sensX, 1.5);
   assert.equal(l.look.sensY, 1.5);
   assert.deepEqual(
-    l.buttons.map((b) => [b.id, b.bind, b.pointer, b.mode]),
+    l.buttons.map((b) => [b.id, b.label, b.bind, b.mode, b.x, b.y]),
     [
-      ["fire", "mouse:0", 1, "hold"],
-      ["aim", "mouse:2", 2, "hold"],
-      ["jump", "key:Space", 3, "hold"],
-      ["b123", "key:KeyG", 4, "hold"],
-    ],
-    "ponteiros = índice + 1 (como o site antigo enviava)"
+      ["fire", "Atirar", "mouse:0", "hold", 0.88, 0.62],
+      ["aim", "Mirar", "mouse:2", "hold", 0.8, 0.45],
+      ["jump", "Pular", "key:Space", "hold", 0.92, 0.8],
+      ["b123", "Granada", "key:KeyG", "hold", 0.5, 0.2],
+    ]
   );
+  assert.ok(l.buttons.every((b) => !("pointer" in b)), "sem ponteiro fixo (atribuído no aperto)");
   // retrato começa no padrão novo e ainda não confirmado (mapeador abre na 1ª vez em retrato)
   assert.deepEqual(p.portrait.buttons.map((b) => b.id), DEFAULT_PORTRAIT.buttons.map((b) => b.id));
   assert.notEqual(p.portrait.confirmed, true);
@@ -153,33 +156,100 @@ test("exportar / importar (JSON novo, objeto cru e layout v1)", () => {
   assert.throws(() => importProfile(s, "nada"), /JSON válido/);
   assert.throws(() => importProfile(s, '{"a":1}'), /não parece/);
   // valores absurdos são saneados
-  const evil = importProfile(
+  const evil = importProfileWithReport(
     s,
-    JSON.stringify({ landscape: { buttons: Array.from({ length: 20 }, (_, i) => ({ id: "x", x: 9, y: -3, size: 99, pointer: 1, bind: "key:Bad Key!" + i })) } })
+    JSON.stringify({ landscape: { buttons: Array.from({ length: 25 }, (_, i) => ({ id: "x", x: 9, y: -3, size: 99, pointer: 1, mode: "lol", bind: "key:Bad Key!" + i })) } })
   );
-  const bl = activeProfile(evil).landscape.buttons;
-  assert.equal(bl.length, MAX_BUTTONS);
+  const bl = activeProfile(evil.store).landscape.buttons;
+  assert.equal(MAX_BUTTONS, 20);
+  assert.equal(bl.length, MAX_BUTTONS, "25 botões → cortados em 20");
+  assert.equal(evil.warnings.length, 1);
+  assert.match(evil.warnings[0], /paisagem tinha 25 botões: só os 20 primeiros/);
   assert.equal(new Set(bl.map((b) => b.id)).size, MAX_BUTTONS, "ids únicos");
-  assert.deepEqual(bl.map((b) => b.pointer).sort(), [1, 2, 3, 4, 5, 6, 7], "ponteiros únicos 1..7");
-  assert.ok(bl.every((b) => b.x === 1 && b.y === 0 && b.size <= 0.35 && b.bind === undefined));
+  assert.ok(bl.every((b) => !("pointer" in b)), "ponteiro antigo ignorado");
+  assert.ok(bl.every((b) => b.x === 1 && b.y === 0 && b.size <= 0.35 && b.bind === undefined && b.mode === "hold"));
+  assert.deepEqual(importProfileWithReport(s, text).warnings, [], "perfil normal: sem aviso");
 });
 
-test("ponteiro estável: apagar um botão não muda o ponteiro dos outros; novo usa o menor livre; limite de 7", () => {
+test("limite de 20 botões por layout: '+ Botão' até 20, o 21º é recusado; rótulos 'Botão N'", () => {
   let l = structuredClone(DEFAULT_LANDSCAPE);
-  const before = Object.fromEntries(l.buttons.map((b) => [b.id, b.pointer]));
-  l = removeButton(l, "aim"); // ponteiro 2
-  for (const b of l.buttons) assert.equal(b.pointer, before[b.id]);
-  const r = addButton(l, 0.5, 0.5);
-  assert.equal(r.layout.buttons.find((b) => b.id === r.id)!.pointer, 2, "reaproveita o 2");
-  l = r.layout;
-  l = addButton(l, 0.1, 0.1).layout;
-  l = addButton(l, 0.2, 0.1).layout;
-  assert.equal(l.buttons.length, 7);
-  assert.deepEqual(l.buttons.map((b) => b.pointer).sort(), [1, 2, 3, 4, 5, 6, 7]);
+  l = removeButton(l, "aim");
+  const ids: string[] = [];
+  while (l.buttons.length < MAX_BUTTONS) {
+    const r = addButton(l, 0.5, 0.5, undefined, 20 / 9);
+    assert.ok(r.id);
+    ids.push(r.id!);
+    l = r.layout;
+  }
+  assert.equal(l.buttons.length, 20);
+  assert.equal(new Set(l.buttons.map((b) => b.id)).size, 20, "ids únicos");
+  assert.deepEqual(l.buttons.slice(4).map((b) => b.label).slice(0, 3), ["Botão 5", "Botão 6", "Botão 7"]);
+  assert.equal(new Set(l.buttons.map((b) => b.label)).size, 20, "rótulos sem repetir");
+  assert.ok(l.buttons.every((b) => b.pointer === undefined), "sem ponteiro fixo");
   const full = addButton(l, 0.3, 0.3);
   assert.equal(full.id, undefined);
-  assert.equal(full.layout, l, "8º botão é recusado");
-  assert.ok(l.buttons.every((b) => b.pointer !== 8 && b.pointer !== 9 && b.pointer !== 0));
+  assert.equal(full.layout, l, "21º botão é recusado");
+  // rótulo não repete um que já existe
+  const named = { ...l, buttons: l.buttons.slice(0, 3).map((b, i) => ({ ...b, label: `Botão ${i + 4}` })) };
+  assert.equal(nextButtonLabel(named), "Botão 7");
+});
+
+test("posições iniciais: botões criados no mesmo ponto não ficam empilhados (paisagem e retrato)", () => {
+  for (const [o, aspect, w, h] of [["landscape", 20 / 9, 2000, 900], ["landscape", 16 / 9, 1280, 720], ["portrait", 9 / 20, 900, 2000]] as const) {
+    let l = o === "landscape" ? structuredClone(DEFAULT_LANDSCAPE) : structuredClone(DEFAULT_PORTRAIT);
+    // clique sempre no centro (e algumas vezes em cima do joystick)
+    for (let i = 0; l.buttons.length < MAX_BUTTONS; i++) l = addButton(l, i % 4 === 3 ? l.joystick.x : 0.5, i % 4 === 3 ? l.joystick.y : 0.5, undefined, aspect).layout;
+    assert.deepEqual(overlappingControls(l, w, h), [], `${o} ${aspect.toFixed(2)}: nenhum controle sobreposto`);
+    for (const b of controlBoxes(l, w, h)) {
+      assert.ok(b.rect.left >= -1 && b.rect.top >= -1, `${b.id} fora da tela`);
+      assert.ok(b.rect.left + b.rect.width <= w + 1 && b.rect.top + b.rect.height <= h + 1, `${b.id} fora da tela`);
+    }
+    // o 1º botão novo nasce exatamente no ponto clicado (estava livre)
+    const first = addButton(o === "landscape" ? structuredClone(DEFAULT_LANDSCAPE) : structuredClone(DEFAULT_PORTRAIT), 0.4, 0.3, undefined, aspect);
+    const fb = first.layout.buttons.at(-1)!;
+    assert.deepEqual([fb.x, fb.y], [0.4, 0.3]);
+  }
+  // sem ponto pedido: perto do centro, livre
+  const c = addButton(structuredClone(DEFAULT_LANDSCAPE), null, null, undefined, 16 / 9).layout;
+  assert.deepEqual(overlappingControls(c, 1600, 900), []);
+  // tela lotada (botões grandes): ainda devolve um ponto válido, escalonado
+  const big = structuredClone(DEFAULT_LANDSCAPE);
+  big.buttons = Array.from({ length: 19 }, (_, i) => ({ id: `g${i}`, label: "G", mode: "hold" as const, x: (i % 5) * 0.25, y: Math.floor(i / 5) * 0.33, size: 0.35 }));
+  const p = freeSpot(big, 16 / 9, 0.15, { x: 0.5, y: 0.5 });
+  assert.ok(p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1);
+});
+
+test("perfis salvos até 0.3.2 (ponteiro fixo 1..7, repetido ou inválido) abrem iguais, sem perder nada", () => {
+  const old = structuredClone(DEFAULT_LANDSCAPE) as unknown as { buttons: Record<string, unknown>[] };
+  old.buttons = old.buttons.map((b, i) => ({ ...b, pointer: [1, 1, 9, 0, 7][i] }));
+  old.buttons.push({ id: "fire", label: "Dup", bind: "key:KeyQ", mode: "toggle", pointer: 3, x: 0.2, y: 0.2, size: 0.12 });
+  const store = { version: 2, activeId: "a", profiles: [{ id: "a", name: "Antigo", landscape: { ...old, confirmed: true }, portrait: DEFAULT_PORTRAIT }] };
+  const l = activeProfile(loadStore(mem({ [STORE_KEY]: JSON.stringify(store) }))).landscape;
+  assert.equal(l.buttons.length, 6);
+  assert.deepEqual(l.buttons.slice(0, 5), DEFAULT_LANDSCAPE.buttons, "mesmos botões (rótulo, tecla, tipo, posição, tamanho)");
+  assert.equal(l.buttons[5].label, "Dup");
+  assert.equal(l.buttons[5].mode, "toggle");
+  assert.notEqual(l.buttons[5].id, "fire", "id repetido ganha outro");
+  assert.ok(l.buttons.every((b) => !("pointer" in b)));
+  // salvar/recarregar mantém; 20 botões sobrevivem ao recarregar
+  let s = loadStore(mem());
+  s = updateLayout(s, "portrait", (x) => {
+    let y = x;
+    while (y.buttons.length < MAX_BUTTONS) y = addButton(y, 0.5, 0.5, undefined, 9 / 20).layout;
+    return { ...y, confirmed: true };
+  });
+  const kv = mem();
+  saveStore(kv, s);
+  const again = loadStore(kv);
+  assert.equal(activeProfile(again).portrait.buttons.length, 20);
+  assert.deepEqual(again, s);
+  // exportar/importar com 20
+  const imp = importProfileWithReport(again, exportProfile(activeProfile(again)));
+  assert.deepEqual(imp.warnings, []);
+  assert.deepEqual(activeProfile(imp.store).portrait.buttons, activeProfile(again).portrait.buttons);
+  // armazenamento com mais de 20 (editado à mão): corta em 20 sem quebrar
+  const huge = { version: 2, activeId: "h", profiles: [{ id: "h", name: "H", landscape: { buttons: Array.from({ length: 30 }, (_, i) => ({ id: `z${i}`, label: `Z${i}` })) }, portrait: {} }] };
+  assert.equal(activeProfile(loadStore(mem({ [STORE_KEY]: JSON.stringify(huge) }))).landscape.buttons.length, 20);
 });
 
 test("conflitos de atalho (inclui F8 e Esc reservados)", () => {
@@ -377,9 +447,7 @@ test("todo controle é removível (botões padrão, joystick, câmera) e nada re
   assert.deepEqual(l.buttons.map((b) => b.id), ["crouch", "reload"]);
   assert.equal(l.joystick.up, "KeyW", "joystick removido guarda as teclas para adicionar de volta");
   assert.deepEqual(controlBoxes(l, 1000, 450).map((b) => b.id), ["crouch", "reload"], "removidos não são desenhados");
-  // os botões que sobraram mantêm o ponteiro; um novo usa o menor livre
-  assert.deepEqual(l.buttons.map((b) => b.pointer), [4, 5]);
-  assert.equal(addButton(l, 0.5, 0.5).layout.buttons.at(-1)!.pointer, 1);
+  assert.equal(addButton(l, 0.5, 0.5).layout.buttons.length, 3);
   const kv = mem();
   saveStore(kv, s);
   const again = activeProfile(loadStore(kv)).landscape;

@@ -6,6 +6,7 @@ import MapperPanel, { CaptureTarget, Placing } from "@/components/MapperPanel";
 import Toolbar from "@/components/Toolbar";
 import UsbPanel from "@/components/UsbPanel";
 import { InputController, InputSink } from "@/lib/inputController";
+import { MAX_SIMULTANEOUS_BUTTONS } from "@/lib/pointerPool";
 import {
   Layout,
   Orientation,
@@ -134,6 +135,8 @@ export default function Page() {
   }, []);
 
   const notify = useCallback((text: string, ok = true) => setNotice({ text, ok, at: Date.now() }), []);
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice((n) => (n === notice ? null : n)), 9000);
@@ -345,6 +348,9 @@ export default function Page() {
           dispatchRef.current("toggle");
         },
         onEscape: () => dispatchRef.current("escape"),
+        // 8º botão ao mesmo tempo: ignorado (limite do Android). Aviso discreto (o controlador já espaça os avisos).
+        onTouchLimit: () =>
+          notifyRef.current(`⚠ Limite de ${MAX_SIMULTANEOUS_BUTTONS} toques simultâneos do Android: solte um botão para apertar outro.`),
       });
       inputRef.current = input;
       input.attach();
@@ -536,7 +542,8 @@ export default function Page() {
       setPlacing(null);
       if (!pl) return;
       if (pl.kind === "move") return moveControl(pl.id, x, y);
-      const res = addButton(r.current.layout, x, y);
+      // No ponto clicado; se ali já há um controle, na posição livre mais próxima (botões não nascem empilhados).
+      const res = addButton(r.current.layout, x, y, undefined, r.current.aspect);
       if (!res.id) return;
       editLayout(() => res.layout);
       setSelected(res.id);

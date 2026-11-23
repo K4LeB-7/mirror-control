@@ -76,6 +76,11 @@ O formato do pacote NÃO muda (`[action u8, keyId u8, x f32, y f32, dx f32, dy f
 - **Deadman** (celular, só para toques com geração): um dedo sem DOWN-keepalive/MOVE por `deadmanMs` é solto sozinho.
   Assim um UP perdido no canal WebRTC sem retransmissão prende o dedo no máximo ~0,5 s (e só se as 3 cópias se
   perderem). Um keepalive que chega depois do deadman (rede engasgou) volta a pressionar.
+- **Ponteiros (site 0.3.3+)**: 0 joystick, 8 mouse no modo livre, 9 câmera; os BOTÕES (até 20 por layout) não têm
+  ponteiro fixo: no aperto o site pega o menor ponteiro livre de 1..7 (preferindo um solto há ≥ 80 ms) e o devolve
+  ao soltar; o UP vai sempre ao ponteiro do DOWN. Com 7 botões pressionados, o 8º é ignorado (nada é enviado). O
+  mesmo ponteiro pode ser usado por botões diferentes em sequência; cada toque tem geração nova, então cópias/UP
+  atrasados do toque anterior são ignorados pelas regras acima. O app não muda (continua tratando ids 0..9).
 - **Sem `caps`** (app ≤ 0.3.0) o site manda como antes (sem cópias nem keepalive; o joystick reenvia a posição a cada
   100 ms). App 0.3.1 com site antigo: geração 0, sem deadman (comportamento antigo, já com a correção abaixo).
 

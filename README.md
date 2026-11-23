@@ -25,7 +25,8 @@ Site: https://mirror-control.vercel.app
    abre `tcp:27183` no celular e recebe H.264 (WebCodecs → `<canvas>`); entrada no mesmo pacote de 18 bytes.
    Protocolo em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md), passo a passo em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md).
 4. Mapeamento por **percentual** (0.0–1.0) da tela → funciona em qualquer proporção.
-   WASD vira um joystick virtual (um dedo que arrasta), teclas/botões do mouse viram toques fixos.
+   WASD vira um joystick virtual (um dedo que arrasta), teclas/botões do mouse viram toques fixos (até 20 botões por
+   layout; no máximo 7 apertados ao mesmo tempo, limite de dedos do Android — site 0.3.3).
    **Mouse livre** (padrão): clique/arraste = toque, roda = rolar, botão direito = Voltar. **Mouse travado** (F8;
    Esc solta): Pointer Lock vira o dedo da câmera. Perfis com layout de retrato e de paisagem, editor em painel
    lateral, rotação (Retrato/Paisagem/Auto) e Voltar/Início/Recentes pela barra (app 0.3.0+). Todos os controles
