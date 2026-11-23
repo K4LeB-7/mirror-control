@@ -79,12 +79,25 @@ O formato do pacote NÃO muda (`[action u8, keyId u8, x f32, y f32, dx f32, dy f
 - **Sem `caps`** (app ≤ 0.3.0) o site manda como antes (sem cópias nem keepalive; o joystick reenvia a posição a cada
   100 ms). App 0.3.1 com site antigo: geração 0, sem deadman (comportamento antigo, já com a correção abaixo).
 
-**Toques no Android** (`TouchPlanner` + `TouchInjector`, app 0.3.1): um dedo só levanta quando um segmento
-`willContinue=false` é despachado e completado (antes, um UP que chegava com um gesture em voo removia o dedo sem esse
-segmento e ele ficava pressionado: "clique vira segurar"). Toque mínimo de 50 ms (DOWN e UP quase juntos continuam
-sendo um clique). DOWN/UP/DOWN rápidos no mesmo ponteiro entram em fila (nada é engolido). Dedo parado não gera
-gestures (só uma renovação de 8 ms a cada 250 ms); MOVE/UP com nada em voo saem na hora; MOVEs durante um gesture em
-voo são agrupados (vale o último).
+**Toques no Android** (`TouchPlanner` + `TouchInjector`; o pacote de 18 bytes e as regras acima NÃO mudaram na 0.3.2):
+um dedo só levanta quando um segmento `willContinue=false` é despachado e completado (0.3.1: antes, um UP que chegava
+com um gesture em voo removia o dedo sem esse segmento e ele ficava pressionado: "clique vira segurar"). Toque mínimo
+de 50 ms (DOWN e UP quase juntos continuam sendo um clique). DOWN/UP/DOWN rápidos no mesmo ponteiro entram em fila
+(nada é engolido). MOVE/UP com nada em voo saem na hora; MOVEs durante um gesture em voo são agrupados (vale o último).
+
+App 0.3.2 (regras do `MotionEventInjector` do AOSP 14/15, modeladas em `AospTouchModel.kt` nos testes JVM):
+- **Todo gesture gera pelo menos um MotionEvent.** Um gesture só de continuações paradas (caminho de comprimento zero)
+  não gera evento e o Android o recusa (`onCancelled`); a 0.3.1 renovava o dedo parado assim a cada 250 ms, tratava a
+  recusa como cancelamento e re-encostava os dedos, e o Android mandava ACTION_CANCEL (com um ponteiro só) + DOWN novo
+  ao jogo. Agora um dedo parado faz um micro-movimento de 1 px (vai e volta) quando nada mais no gesture muda.
+- **Dedo segurado = fluxo contínuo**: um segmento a cada `holdPeriodMs` = 16 ms (≈60 gestures/s; troca CPU x
+  suavidade em `TouchPlanner.Config`; 250 volta ao modo econômico, agora sem recusa).
+- **Toque novo encosta no ponto do DOWN e arrasta** até a posição atual (DOWN+MOVE que chegam juntos não viram um
+  toque direto no destino). Depois de um cancelamento real (toque na tela), joystick/botões recomeçam do ponto do DOWN;
+  a câmera recomeça onde estava. Strokes novos em ordem crescente de ponteiro (o joystick fica com o menor id).
+- **Ids de ponteiro do sistema**: o Android só libera um id quando todos os dedos injetados levantam e, gastos 0..9, dá
+  10 a todo dedo novo. O planejador prevê os ids e, antes de dois dedos colidirem, levanta e re-encosta todos
+  ("reciclagem", ~10 ms).
 
 ## Vídeo
 - H.264 (Baseline, ou o perfil padrão do encoder se o Baseline falhar), CBR, I-frame a cada 1 s,

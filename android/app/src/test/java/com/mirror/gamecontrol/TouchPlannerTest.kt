@@ -13,7 +13,8 @@ import kotlin.random.Random
  * Testes do planejador de toques. [FakeAndroid] imita as regras do MotionEventInjector do Android que importam aqui:
  * um gesture em voo por vez; um gesture que continua strokes tem de continuar TODOS os abertos, começando no ponto
  * exato em que pararam; strokes novos num gesture de continuação não podem estar no 1º passo (t=0); um ponteiro só
- * levanta quando um segmento com willContinue=false termina.
+ * levanta quando um segmento com willContinue=false termina; um gesture que não gera nenhum MotionEvent é recusado.
+ * O modelo completo do AOSP (ids de ponteiro, passos, CANCEL) fica em AospTouchModel/AospInjectionTest.
  */
 class TouchPlannerTest {
 
@@ -22,6 +23,9 @@ class TouchPlannerTest {
         val open = HashMap<Int, Pair<Int, Int>>() // strokes abertos após o último gesture completado
         val violations = ArrayList<String>()
         val pressStart = HashMap<Int, Long>()
+        /** Ponto do DOWN e do UP de cada ponteiro (último toque). */
+        val firstDownAt = HashMap<Int, Pair<Int, Int>>()
+        val lastUpAt = HashMap<Int, Pair<Int, Int>>()
         /** (ponteiro, duração pressionado em ms) de cada toque que levantou. */
         val taps = ArrayList<Pair<Int, Long>>()
         var dispatched = 0
@@ -43,10 +47,11 @@ class TouchPlannerTest {
                 for (s in g.segments.filter { !it.continues }) if (s.startMs < 1) violations += "t=$now stroke novo no 1º passo de uma continuação: $s"
             }
             if (g.segments.map { it.pointer }.toSet().size != g.segments.size) violations += "t=$now ponteiro repetido: $g"
+            if (g.segments.none { it.producesEvent }) violations += "t=$now gesture sem nenhum evento (o sistema recusa): $g"
             for (s in g.segments) {
                 if (s.durationMs <= 0 || s.startMs < 0) violations += "t=$now duração/início inválido: $s"
                 if (minOf(s.fromX, s.fromY, s.toX, s.toY) < 0) violations += "t=$now coordenada negativa: $s"
-                if (!s.continues) pressStart[s.pointer] = now + s.startMs
+                if (!s.continues) { pressStart[s.pointer] = now + s.startMs; firstDownAt[s.pointer] = s.fromX to s.fromY }
             }
         }
 
@@ -57,6 +62,7 @@ class TouchPlannerTest {
                 if (s.willContinue) open[s.pointer] = s.toX to s.toY
                 else {
                     open.remove(s.pointer)
+                    lastUpAt[s.pointer] = s.toX to s.toY
                     taps += s.pointer to (at + s.startMs + s.durationMs - (pressStart.remove(s.pointer) ?: 0))
                 }
             }
@@ -218,21 +224,54 @@ class TouchPlannerTest {
         s.assertClean()
     }
 
-    @Test fun holdingKeepsPointerDownWithoutGestureStorm() {
+    /**
+     * 0.3.2: dedo segurado recebe um segmento a cada holdPeriodMs (16 ms) e cada gesture gera evento (micro-movimento
+     * de 1 px vai-e-volta). A 0.3.1 esperava 15..25 gestures em 5 s (renovação a cada 250 ms), e cada renovação era
+     * um gesture SEM evento que o Android recusa (ver AospInjectionTest): por isso a expectativa mudou.
+     */
+    @Test fun holdingKeepsPointerDownWithContinuousNonEmptySegments() {
         val s = Sim()
-        s.down(0)
+        s.down(0, 500f, 500f)
         s.drain(5000)
         assertTrue(0 in s.android.down)
-        // parado: 1 gesture inicial + renovação a cada 250 ms (o laço antigo fazia ~60/s)
-        assertTrue("gestures=${s.android.dispatched}", s.android.dispatched in 15..25)
+        assertTrue("gestures=${s.android.dispatched}", s.android.dispatched in 280..320)
+        val (x, y) = s.android.open[0]!!
+        assertTrue("fica a no máximo 1 px do ponto: ($x,$y)", kotlin.math.abs(x - 500) + kotlin.math.abs(y - 500) <= 1)
         s.up(0)
         s.drain()
+        assertTrue(s.android.down.isEmpty())
+        assertEquals("levantou no ponto exato", 500 to 500, s.android.lastUpAt[0])
+        s.assertClean()
+    }
+
+    @Test fun economicHoldPeriodStillNeverSendsAnEmptyGesture() {
+        val s = Sim(TouchPlanner(cfg = TouchPlanner.Config(holdPeriodMs = 250)))
+        s.down(0, 1079f, 2399f) // canto: o micro-movimento vai para dentro da tela
+        s.down(3, 300f, 300f)
+        s.drain(5000)
+        assertTrue(s.android.down.containsAll(listOf(0, 3)))
+        assertTrue("gestures=${s.android.dispatched}", s.android.dispatched in 15..30)
+        s.releaseAll(); s.drain()
         assertTrue(s.android.down.isEmpty())
         s.assertClean()
     }
 
-    @Test fun moveIsDispatchedImmediatelyWhenIdle() {
+    @Test fun newTouchStartsAtItsDownPointAndDragsToTheLatestMove() {
         val s = Sim()
+        s.down(5, 10f, 10f)
+        s.advance(3) // gesture em voo: o DOWN do joystick e o MOVE chegam juntos
+        s.p.down(0, 200f, 800f, s.now)
+        s.p.move(0, 100f, 800f, s.now)
+        s.drain(200)
+        assertEquals("o joystick encostou no centro (DOWN)", 200 to 800, s.android.firstDownAt[0])
+        val (x, _) = s.android.open[0]!!
+        assertTrue("e arrastou até a esquerda: $x", x in 99..101)
+        s.releaseAll(); s.drain(); s.assertClean()
+    }
+
+    @Test fun moveIsDispatchedImmediatelyWhenIdle() {
+        // renovação esparsa para haver janelas sem gesture em voo (no modo contínuo há quase sempre um em voo)
+        val s = Sim(TouchPlanner(cfg = TouchPlanner.Config(holdPeriodMs = 250)))
         s.down(0, 100f, 100f)
         s.drain(100)
         val before = s.android.dispatched
@@ -508,7 +547,7 @@ class TouchPlannerTest {
             }
             val gps = s.android.dispatched.toDouble() / secs
             s.releaseAll(); s.drain(); s.assertClean()
-            return "%-48s %6.1f gestures/s (antes: ~%.0f/s)".format(name, gps, 1000.0 / 17)
+            return "%-48s %6.1f gestures/s".format(name, gps)
         }
         val lines = listOf(
             run("1 dedo parado (W segurado)", { down(0) }),
@@ -521,7 +560,7 @@ class TouchPlannerTest {
             },
         )
         val text = "TouchPlanner — gestures despachados por segundo (simulação de ${secs}s):\n" + lines.joinToString("\n") +
-            "\n(antes = laço antigo: um gesture de 16 ms atrás do outro enquanto houver dedo segurado)\n"
+            "\n(0.3.0: ~59/s; 0.3.1: ~4/s com dedo parado, mas cada renovação era recusada pelo Android; 0.3.2: holdPeriodMs=16)\n"
         println(text)
         File("build").mkdirs()
         File("build/touchplanner-bench.txt").writeText(text)

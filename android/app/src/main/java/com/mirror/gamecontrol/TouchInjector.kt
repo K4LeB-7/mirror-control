@@ -16,6 +16,9 @@ import android.util.Log
  *
  * Roda numa thread própria ("touch-injector", prioridade de display), não na main thread: a UI do app e o
  * RtcClient não atrasam toques, e vice-versa. AccessibilityService.dispatchGesture é sincronizado internamente.
+ *
+ * Com dedo segurado há um gesture a cada ~16 ms (TouchPlanner.Config.holdPeriodMs): o jogo recebe um fluxo
+ * contínuo de MOVE, como de um dedo real. [stats] alimenta a linha "Diagnóstico de toque" do app.
  */
 class TouchInjector(
     private val service: AccessibilityService,
@@ -26,11 +29,15 @@ class TouchInjector(
     private val planner = TouchPlanner(maxStrokes = safeMaxStrokes())
     @Volatile private var closed = false
 
+    /** Contadores para o diagnóstico (escritos só nesta thread; lidos pela UI). */
+    val stats = TouchStats()
+
     // Só na thread do injetor:
     private val strokes = arrayOfNulls<StrokeDescription>(TouchPlanner.MAX_POINTERS)
     private val paths = Array(TouchPlanner.MAX_POINTERS) { Path() }
     private val built = arrayOfNulls<StrokeDescription>(TouchPlanner.MAX_POINTERS)
     private var current: GestureDescription? = null
+    private var currentAt = 0L
     private var wakeAt = Long.MAX_VALUE
     private var screenW = 0
     private var screenH = 0
@@ -48,6 +55,7 @@ class TouchInjector(
         if (current == null) return@Runnable
         Log.w(TAG, "gesture sem resposta do sistema; tratando como cancelado")
         current = null
+        stats.onCancelled(now(), currentAt)
         planner.cancelled(now())
         pump()
     }
@@ -69,6 +77,7 @@ class TouchInjector(
             if (g !== current) return
             handler.removeCallbacks(watchdog)
             current = null
+            stats.onCancelled(now(), currentAt)
             planner.cancelled(now())
             pump()
         }
@@ -76,6 +85,7 @@ class TouchInjector(
 
     init {
         handler.post {
+            stats.reset(now())
             try {
                 Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
             } catch (e: Exception) {
@@ -116,6 +126,12 @@ class TouchInjector(
             planner.setDeadman(if (ms <= 0) 0 else ms.coerceIn(MIN_DEADMAN_MS, MAX_DEADMAN_MS))
             pump()
         }
+    }
+
+    /** Zera os contadores do diagnóstico (o app chama ao ligar a linha "Diagnóstico de toque"). */
+    fun resetStats() {
+        if (closed) return
+        handler.post { stats.reset(now()) }
     }
 
     /** Serviço desligando: solta os dedos e encerra a thread. */
@@ -176,6 +192,7 @@ class TouchInjector(
         val t = now()
         val g = planner.plan(t)
         if (g == null) {
+            stats.onIdle(t, planner.activeCount)
             schedule(planner.wakeAt(t), t)
             return
         }
@@ -189,6 +206,7 @@ class TouchInjector(
             return
         }
         current = gesture
+        currentAt = t
         val ok = try {
             service.dispatchGesture(gesture, callback, handler)
         } catch (e: Exception) {
@@ -200,6 +218,7 @@ class TouchInjector(
             planner.dispatchFailed()
             strokes.fill(null)
         } else {
+            stats.onDispatch(t, planner.activeCount, g.recycle)
             handler.removeCallbacks(watchdog)
             handler.postDelayed(watchdog, g.durationMs + WATCHDOG_SLACK_MS)
         }

@@ -98,5 +98,20 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Parar" />
+
+        <CheckBox
+            android:id="@+id/touchDiag"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Diagnóstico de toque" />
+
+        <TextView
+            android:id="@+id/touchDiagText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 </ScrollView>

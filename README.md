@@ -31,8 +31,10 @@ Site: https://mirror-control.vercel.app
    lateral, rotação (Retrato/Paisagem/Auto) e Voltar/Início/Recentes pela barra (app 0.3.0+). Todos os controles
    (inclusive joystick, câmera e botões padrão) podem ser excluídos, com Desfazer, Limpar tudo e Restaurar padrão.
 5. **Toques confiáveis (app 0.3.1+)**: as decisões de toque ficam no `TouchPlanner.kt` (puro, testado na JVM): todo
-   dedo termina com o "levantar" do Android (clique nunca vira "segurar"), toque mínimo de 50 ms e dedo parado sem
-   gestos contínuos. No WebRTC, DOWN/UP levam uma geração, são repetidos e há keepalive + "deadman" no celular
+   dedo termina com o "levantar" do Android (clique nunca vira "segurar") e toque mínimo de 50 ms. App 0.3.2: todo
+   gesto gera evento (o Android recusava as renovações de dedo parado e mandava CANCEL ao jogo: "anda, para" e
+   "A + Espaço anda para a direita"), dedos segurados com fluxo contínuo (~60 gestos/s), ids de ponteiro sem
+   colisão e a linha **Diagnóstico de toque** no app. Modelo do injetor do AOSP nos testes JVM (`AospTouchModel.kt`). No WebRTC, DOWN/UP levam uma geração, são repetidos e há keepalive + "deadman" no celular
    (soltar perdido nunca prende o dedo). Detalhes em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md#entrada-pacote-de-18-bytes--v2-site-e-app-031).
    Guia de uso em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#usando-o-site-app-e-site-030).
 
@@ -58,4 +60,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão atual do app: 0.3.1 (ver `apk/version.json`).
+Versão do app no código: 0.3.2 (versionCode 11). O APK publicado em `apk/` (ver `apk/version.json`) é trocado na publicação.

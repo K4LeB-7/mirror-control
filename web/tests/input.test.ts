@@ -363,3 +363,180 @@ test("fuzz: qualquer sequência de teclas/mouse/blur termina com todo DOWN tendo
     ic.detach();
   }
 });
+
+// ---------------------------------------------------------------- bug A: combinações de teclas (A + Espaço etc.)
+
+/** Celular: aplica os pacotes com as regras de geração do TouchPlanner (v2) ou do app antigo (gen 0). */
+class PhoneModel {
+  held = new Map<number, { gen: number; x: number; y: number }>();
+  lastGen = new Map<number, number>();
+  ended = new Map<number, boolean>();
+  apply(p: Pkt) {
+    const k = p.k;
+    if (p.a === Action.RELEASE_ALL) {
+      for (const id of this.held.keys()) this.ended.set(id, true);
+      this.held.clear();
+      return;
+    }
+    const gen = p.a === Action.DOWN || p.a === Action.UP ? p.dx : 0;
+    const live = this.held.get(k);
+    if (p.a === Action.DOWN) {
+      if (gen > 0) {
+        const last = this.lastGen.get(k) ?? 0;
+        if (gen < last) return;
+        if (gen === last) {
+          if (this.ended.get(k)) return;
+          if (live && live.gen === gen) return; // keepalive: NÃO reposiciona
+        } else {
+          this.lastGen.set(k, gen);
+          this.ended.set(k, false);
+        }
+      } else if (live) return;
+      this.held.set(k, { gen, x: p.x, y: p.y });
+    } else if (p.a === Action.UP) {
+      if (gen > 0) {
+        if (gen < (this.lastGen.get(k) ?? 0)) return;
+        this.lastGen.set(k, gen);
+        this.ended.set(k, true);
+      }
+      this.held.delete(k);
+    } else if (p.a === Action.MOVE && live) {
+      live.x = p.x;
+      live.y = p.y;
+    }
+  }
+}
+
+test("A + Espaço e combinações: o dedo do joystick nunca vai para a direita com A e o pulo nunca mexe nele (v2 e app antigo)", () => {
+  const J = DEFAULT_LANDSCAPE.joystick;
+  for (const v2 of [true, false]) {
+    const { ic, sent, key, tick } = setup({ mode: "locked" });
+    if (v2) ic.setPhoneCaps(2);
+    const phone = new PhoneModel();
+    const pressed = new Set<string>();
+    let seen = 0;
+    const label = v2 ? "v2" : "app antigo";
+    /** Aplica os pacotes novos no celular e confere as invariantes depois de cada pacote. */
+    const check = (what: string) => {
+      for (; seen < sent.length; seen++) {
+        const p = sent[seen];
+        phone.apply(p);
+        const vx = (pressed.has("KeyD") ? 1 : 0) - (pressed.has("KeyA") ? 1 : 0);
+        if (p.k === POINTER_JOYSTICK && (p.a === Action.DOWN || p.a === Action.MOVE)) {
+          if (vx < 0) assert.ok(p.x <= J.x + 1e-6, `${label} ${what}: pacote do joystick à direita com A: ${JSON.stringify(p)}`);
+          if (vx > 0) assert.ok(p.x >= J.x - 1e-6, `${label} ${what}: pacote do joystick à esquerda com D: ${JSON.stringify(p)}`);
+        }
+        const j = phone.held.get(POINTER_JOYSTICK);
+        if (j && vx < 0) assert.ok(j.x <= J.x + 1e-6, `${label} ${what}: celular com o joystick à direita (${j.x})`);
+      }
+    };
+    const down = (code: string, extra = {}) => { pressed.add(code); key("keydown", code, extra); check(`keydown ${code}`); };
+    const up = (code: string) => { pressed.delete(code); key("keyup", code); check(`keyup ${code}`); };
+    const wait = (ms: number) => { for (let t = 0; t < ms; t += 10) { tick(Math.min(10, ms - t)); check(`+${t}ms`); } };
+    const expectState = (what: string) => {
+      const vx = (pressed.has("KeyD") ? 1 : 0) - (pressed.has("KeyA") ? 1 : 0);
+      const vy = (pressed.has("KeyS") ? 1 : 0) - (pressed.has("KeyW") ? 1 : 0);
+      const j = phone.held.get(POINTER_JOYSTICK);
+      if (vx === 0 && vy === 0) assert.equal(j, undefined, `${label} ${what}: joystick deveria estar solto`);
+      else {
+        assert.ok(j, `${label} ${what}: joystick deveria estar pressionado`);
+        assert.equal(Math.sign(Math.round((j!.x - J.x) * 1e4)), vx, `${label} ${what}: direção x`);
+        assert.equal(Math.sign(Math.round((j!.y - J.y) * 1e4)), vy, `${label} ${what}: direção y`);
+      }
+      assert.equal(phone.held.has(3), pressed.has("Space"), `${label} ${what}: pulo`);
+    };
+
+    // 1) A segurado + Espaço curto/longo/rapidíssimo, repetido
+    down("KeyA"); wait(50); expectState("A");
+    for (const hold of [0, 10, 40, 120, 300, 5]) {
+      const before = sent.length;
+      down("Space");
+      const atDown = sent.slice(before);
+      assert.ok(atDown.every((p) => p.k === 3), `${label}: DOWN do pulo não gera pacote do joystick: ${JSON.stringify(atDown)}`);
+      wait(hold);
+      const b2 = sent.length;
+      up("Space");
+      assert.ok(sent.slice(b2).every((p) => p.k === 3), `${label}: UP do pulo não gera pacote do joystick`);
+      wait(70); expectState(`A + Espaço ${hold} ms`);
+    }
+    // 2) A → D (rollover: D antes de soltar A), A+D juntos (centro = solta), D sozinho
+    down("KeyD"); wait(30); expectState("A+D");
+    up("KeyA"); wait(30); expectState("D");
+    down("Space"); wait(30); up("Space"); wait(70); expectState("D + Espaço");
+    down("KeyA"); wait(10); up("KeyD"); wait(30); expectState("D→A");
+    // 3) diagonal W+A+Espaço, auto-repeat, Shift/Ctrl
+    down("KeyW"); wait(30); expectState("W+A");
+    down("Space"); wait(20);
+    for (let i = 0; i < 10; i++) { key("keydown", "KeyA", { repeat: true }); key("keydown", "Space", { repeat: true }); wait(30); }
+    expectState("W+A+Espaço com repetição automática");
+    down("ShiftLeft"); down("Space", { shiftKey: true }); wait(30); expectState("Shift");
+    up("Space"); down("ControlLeft"); wait(30); expectState("Ctrl"); up("ControlLeft"); up("ShiftLeft");
+    up("KeyW"); wait(30); expectState("A");
+    // 4) keepalive/redundância por 3 s com A segurado e pulos a cada 250 ms
+    for (let i = 0; i < 12; i++) { down("Space"); wait(60); up("Space"); wait(190); }
+    expectState("A após 3 s de pulos");
+    // 5) keyup perdido: a janela perde o foco (Alt+Tab) com A segurado → solta tudo; o keyup que chega depois não age
+    win.fire("blur"); pressed.clear(); wait(100); expectState("blur");
+    key("keyup", "KeyA"); wait(100); expectState("keyup atrasado");
+    // 6) gerações: cada toque novo tem geração maior; as cópias repetem a mesma
+    if (v2) {
+      const gens = sent.filter((p) => p.a === Action.DOWN).map((p) => p.dx);
+      let max = 0;
+      for (const gn of gens) { assert.ok(gn >= max || gens.includes(gn), "geração"); max = Math.max(max, gn); }
+      const firstOf = new Map<number, number>();
+      sent.forEach((p, i) => { if (p.a === Action.DOWN && !firstOf.has(p.dx)) firstOf.set(p.dx, i); });
+      const order = [...firstOf.keys()];
+      assert.deepEqual(order, [...order].sort((a, b) => a - b), "1º DOWN de cada geração sai em ordem crescente");
+    }
+    assertBalanced(sent);
+    ic.detach();
+  }
+});
+
+test("joystick: o MOVE sai na hora mesmo com o canal congestionado", () => {
+  const { ic, sent, key } = setup({ mode: "locked", congested: () => true });
+  ic.setPhoneCaps(2);
+  key("keydown", "KeyA");
+  key("keydown", "KeyW");
+  const moves = sent.filter((p) => p.a === Action.MOVE && p.k === POINTER_JOYSTICK);
+  assert.equal(moves.length, 2);
+  assert.ok(moves[1].x < DEFAULT_LANDSCAPE.joystick.x && moves[1].y < DEFAULT_LANDSCAPE.joystick.y);
+  ic.detach();
+});
+
+test("fuzz de combinações: o celular (regras de geração) termina igual às teclas e nunca vê o joystick do lado errado", () => {
+  let seed = 99;
+  const rnd = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) % n);
+  const J = DEFAULT_LANDSCAPE.joystick;
+  for (let round = 0; round < 150; round++) {
+    const { ic, sent, key, tick } = setup({ mode: "locked" });
+    if (round % 2 === 0) ic.setPhoneCaps(2);
+    const phone = new PhoneModel();
+    const pressed = new Set<string>();
+    let seen = 0;
+    const codes = ["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyC", "ShiftLeft"];
+    for (let i = 0; i < 80; i++) {
+      const c = codes[rnd(codes.length)];
+      if (rnd(2)) { key("keydown", c, { repeat: pressed.has(c) }); pressed.add(c); } else { key("keyup", c); pressed.delete(c); }
+      tick(rnd(4) === 0 ? 100 + rnd(300) : rnd(30));
+      for (; seen < sent.length; seen++) phone.apply(sent[seen]);
+      const vx = (pressed.has("KeyD") ? 1 : 0) - (pressed.has("KeyA") ? 1 : 0);
+      const vy = (pressed.has("KeyS") ? 1 : 0) - (pressed.has("KeyW") ? 1 : 0);
+      const j = phone.held.get(POINTER_JOYSTICK);
+      if (vx === 0 && vy === 0) assert.equal(j, undefined, `rodada ${round}: joystick solto`);
+      else {
+        assert.ok(j, `rodada ${round}: joystick pressionado`);
+        assert.equal(Math.sign(Math.round((j!.x - J.x) * 1e4)), vx, `rodada ${round} passo ${i}: direção x`);
+        assert.equal(Math.sign(Math.round((j!.y - J.y) * 1e4)), vy, `rodada ${round} passo ${i}: direção y`);
+      }
+      assert.equal(phone.held.has(3), pressed.has("Space"), `rodada ${round}: pulo`);
+      assert.equal(phone.held.has(4), pressed.has("KeyC"), `rodada ${round}: agachar`);
+    }
+    ic.releaseAll();
+    tick(500);
+    for (; seen < sent.length; seen++) phone.apply(sent[seen]);
+    assert.equal(phone.held.size, 0);
+    assertBalanced(sent);
+    ic.detach();
+  }
+});

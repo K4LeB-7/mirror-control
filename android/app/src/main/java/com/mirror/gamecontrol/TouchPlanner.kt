@@ -1,20 +1,31 @@
 package com.mirror.gamecontrol
 
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
- * Planejador PURO (sem classes do Android, testado na JVM em TouchPlannerTest) dos toques injetados por
- * `dispatchGesture`. O [TouchInjector] só traduz o plano em `StrokeDescription`/`GestureDescription`.
+ * Planejador PURO (sem classes do Android, testado na JVM em TouchPlannerTest e AospInjectionTest) dos toques
+ * injetados por `dispatchGesture`. O [TouchInjector] só traduz o plano em `StrokeDescription`/`GestureDescription`.
  *
- * Modelo do Android (MotionEventInjector):
+ * Regras do Android que importam aqui (lidas do código do AOSP 14/15, `MotionEventInjector` e
+ * `GestureDescription`; modeladas em AospTouchModel nos testes):
  * - Só UM gesture pode estar em voo; despachar outro antes do fim cancela o anterior.
  * - Um dedo "segurado" é uma cadeia de strokes: cada segmento `willContinue=true` continua o anterior
  *   (`continueStroke`). O dedo só LEVANTA (ACTION_UP) quando um segmento com `willContinue=false` termina.
- *   Sem esse segmento final o ponteiro fica pressionado no Android.
  * - Um gesture que continua strokes tem de continuar TODOS os strokes abertos e começar EXATAMENTE onde eles
- *   pararam; senão o sistema cancela tudo. Por isso as coordenadas são inteiras (sem erro de arredondamento) e
- *   strokes NOVOS num gesture de continuação começam 1 ms depois (o 1º passo do gesture só tem continuações).
+ *   pararam; senão o sistema cancela tudo. Por isso as coordenadas são inteiras e strokes NOVOS num gesture de
+ *   continuação começam 1 ms depois (o 1º passo do gesture só pode ter continuações).
+ * - **Um gesture que não gera nenhum MotionEvent é RECUSADO** (`events.isEmpty()` → onCancelled): continuar um dedo
+ *   parado com um caminho de comprimento zero não gera MOVE. O planejador antigo (0.3.1) tratava a recusa como
+ *   cancelamento e recomeçava os dedos como toques novos, e o sistema então mandava ACTION_CANCEL ao jogo e um
+ *   DOWN novo — a cada ~270 ms com o joystick parado (bug "anda, para") e com os ids dos dedos re-atribuídos (bug
+ *   "esquerda + pular anda para a direita"). Aqui todo gesture gera pelo menos um evento: dedos parados fazem um
+ *   micro-movimento de [Config.keepAlivePx] px (vai e volta) quando nada mais no gesture mudaria.
+ * - Ids de ponteiro do sistema: um id só volta a ficar livre quando TODOS os dedos injetados levantam; esgotados
+ *   0..9, todo dedo novo recebe 10 (dois dedos com o mesmo id = eventos descartados ou dedos trocados no jogo). O
+ *   planejador acompanha os ids previstos e, antes de um dedo novo colidir, levanta e re-encosta todos os dedos
+ *   ("reciclagem", [Config.systemPointerIdCap]).
  *
  * Regras daqui:
  * - Um toque ([Press]) só sai do mapa depois que o seu segmento final (`willContinue=false`) foi despachado E
@@ -22,8 +33,13 @@ import kotlin.math.roundToInt
  * - Duração mínima de um toque: [Config.minTapMs] (um clique curto vira um toque reconhecível, nunca "segurar").
  * - DOWN do mesmo ponteiro enquanto o toque anterior ainda termina entra numa fila: nunca é engolido nem herda o
  *   stroke antigo.
- * - Dedo parado não gera gestures: só um segmento curto de "renovação" a cada [Config.idleRefreshMs] (detecta uma
- *   cadeia cortada pelo sistema, ex. o usuário tocou na tela). MOVE/UP com nada em voo despacham na hora.
+ * - Um toque novo encosta no ponto do DOWN e arrasta até a posição atual (DOWN+MOVE que chegam juntos não viram
+ *   um toque direto no destino: um joystick "flutuante" leria zero). Depois de um cancelamento/reciclagem, toques
+ *   "absolutos" (joystick, botões, mouse) recomeçam do ponto do DOWN; a câmera (relativa) recomeça onde estava.
+ * - Dedo segurado recebe um segmento a cada [Config.holdPeriodMs] mesmo parado (fluxo contínuo de MOVE, como um
+ *   dedo real; troca CPU x suavidade documentada em [Config]). MOVE/UP com nada em voo despacham na hora.
+ * - Strokes novos entram em ordem crescente de ponteiro do protocolo (joystick 0 primeiro): depois de um
+ *   recomeço o sistema re-atribui ids na ordem dos strokes, então o joystick fica sempre com o menor id.
  * - Proteção contra UP perdido (canal WebRTC sem retransmissão): DOWN/UP do site novo trazem uma geração (gen);
  *   DOWN repetido com a mesma gen renova o toque ("keepalive") e, com o deadman ligado ([setDeadman]), um toque
  *   não renovado em `deadmanMs` é solto sozinho. UP/DOWN atrasados (gen menor) são ignorados.
@@ -42,10 +58,17 @@ class TouchPlanner(
         val minTapMs: Long = 50,
         /** Menor duração do segmento final. */
         val finalMs: Long = 8,
-        /** Dedo parado: intervalo entre segmentos de renovação (0 = desligado). */
-        val idleRefreshMs: Long = 250,
-        /** Duração do segmento de renovação/de dedos parados que acompanham um gesture. */
-        val holdSegmentMs: Long = 8,
+        /**
+         * Dedo segurado e parado: um segmento novo a cada N ms (do início de um ao início do próximo).
+         * Troca CPU x suavidade: 16 (padrão) ≈ 60 gestures/s e um MOVE a cada ~16 ms por dedo segurado, como a 0.3.0
+         * e como um dedo real; 33 ≈ 30/s (metade da CPU); 250 = modo econômico da 0.3.1 (agora sem o bug, graças ao
+         * micro-movimento, mas o jogo fica até 250 ms sem eventos do dedo). Negativo = nunca renova.
+         */
+        val holdPeriodMs: Long = 16,
+        /** Duração do segmento de manutenção de dedos parados. */
+        val holdSegmentMs: Long = 16,
+        /** Micro-movimento (px) que garante pelo menos um MotionEvent em gestures só de dedos parados. */
+        val keepAlivePx: Int = 1,
         /** Atraso de um stroke novo num gesture que continua outros (ver doc da classe). */
         val newStrokeDelayMs: Long = 1,
         /** Toques enfileirados por ponteiro (DOWN/UP muito rápidos), além do atual. */
@@ -53,6 +76,8 @@ class TouchPlanner(
         /** Recuo depois de um cancelamento (dobra a cada cancelamento seguido, até [maxBackoffMs]). */
         val cancelBackoffMs: Long = 16,
         val maxBackoffMs: Long = 256,
+        /** Teto dos ids de ponteiro do MotionEventInjector (10 no AOSP 8..15). 0 = não prevê nem recicla. */
+        val systemPointerIdCap: Int = 10,
     )
 
     class Segment(
@@ -65,24 +90,33 @@ class TouchPlanner(
         /** true = continua o stroke anterior deste ponteiro (`continueStroke`); false = stroke novo. */
         val continues: Boolean,
     ) {
+        /** Gera algum MotionEvent no sistema (DOWN, UP ou movimento). */
+        val producesEvent: Boolean get() = !continues || !willContinue || fromX != toX || fromY != toY
+
         override fun toString() =
             "Seg(p=$pointer ${if (continues) "cont" else "new"} ($fromX,$fromY)->($toX,$toY) t=$startMs+$durationMs ${if (willContinue) "…" else "END"})"
     }
 
-    class Gesture(val segments: List<Segment>) {
+    class Gesture(val segments: List<Segment>, val recycle: Boolean = false) {
         val durationMs: Long get() = segments.maxOf { it.startMs + it.durationMs }
-        override fun toString() = segments.toString()
+        override fun toString() = (if (recycle) "RECICLA " else "") + segments.toString()
     }
 
-    private class Press(var tx: Float, var ty: Float, val gen: Int, val minHoldMs: Long, now: Long) {
+    private class Press(var tx: Float, var ty: Float, val gen: Int, val minHoldMs: Long, now: Long, val relative: Boolean = false) {
+        /** Ponto do DOWN (um toque novo/recomeçado encosta aqui e arrasta até (tx, ty)). */
+        val ox = tx
+        val oy = ty
         var started = false     // algum segmento já foi despachado
         var open = false        // cadeia aberta no Android (último segmento completou com willContinue=true)
+        var restarted = false   // recomeça depois de cancelamento/reciclagem
+        var recycling = false   // o segmento em voo é o final de uma reciclagem (o toque continua depois)
         var lastX = 0           // fim do último segmento completado
         var lastY = 0
         var up = false          // UP pedido (ou RELEASE_ALL / deadman)
         var firstAt = 0L        // início do 1º segmento
-        var lastDispatchAt = 0L // fim do último segmento completado
+        var lastSegmentAt = 0L  // início do último segmento despachado
         var lastRefresh = now   // último DOWN/MOVE da rede (deadman)
+        var sysId = -1          // id de ponteiro previsto no sistema
         var flight: Segment? = null
     }
 
@@ -96,6 +130,9 @@ class TouchPlanner(
     private var deadmanMs = 0L
     private var backoffUntil = 0L
     private var cancels = 0
+    /** Ids de ponteiro que o sistema considera usados na sequência atual (só ficam livres quando todos levantam). */
+    private val sysUsed = BooleanArray(maxOf(1, cfg.systemPointerIdCap + 1))
+    private var recycleNeeded = false
 
     var inFlight = false
         private set
@@ -104,6 +141,8 @@ class TouchPlanner(
     var gestures = 0L
         private set
     var segments = 0L
+        private set
+    var recycles = 0L
         private set
 
     // ------------------------------------------------------------------ entrada
@@ -191,14 +230,14 @@ class TouchPlanner(
         if (p == null) {
             lookAnchorX = ax
             lookAnchorY = ay
-            p = enqueue(id, Press(ax, ay, 0, 0, now)) ?: return
+            p = enqueue(id, Press(ax, ay, 0, 0, now, relative = true)) ?: return
         }
         p.tx = (p.tx + dx).coerceIn(0f, maxX.toFloat())
         p.ty = (p.ty + dy).coerceIn(0f, maxY.toFloat())
         p.lastRefresh = now
         if (hypot(p.tx - lookAnchorX, p.ty - lookAnchorY) > zone) {
             p.up = true
-            enqueue(id, Press(lookAnchorX, lookAnchorY, 0, 0, now))
+            enqueue(id, Press(lookAnchorX, lookAnchorY, 0, 0, now, relative = true))
         }
     }
 
@@ -218,12 +257,22 @@ class TouchPlanner(
             heads++
             if (p.open) open++
         }
-        if (heads == 0) return null
+        if (heads == 0) {
+            recycleNeeded = false
+            return null
+        }
+        if (open == 0) {
+            // nenhum dedo injetado no chão: o sistema começa uma sequência nova (ids livres de novo)
+            sysUsed.fill(false)
+            recycleNeeded = false
+        }
+        if (recycleNeeded) return dispatch(planRecycle(now), now, recycle = true)
+
         val alone = heads == 1
         val out = ArrayList<Segment>(heads)
         var needed = false
         var strokes = 0
-        // 1º os strokes abertos (TODOS precisam ser continuados), depois os novos.
+        // 1º os strokes abertos (TODOS precisam ser continuados), depois os novos (em ordem crescente de ponteiro).
         for (pass in 0..1) {
             for (id in 0 until MAX_POINTERS) {
                 val p = queues[id]?.firstOrNull() ?: continue
@@ -233,7 +282,6 @@ class TouchPlanner(
                 val ty = clampY(p.ty)
                 val seg: Segment
                 if (p.open) {
-                    val moved = tx != p.lastX || ty != p.lastY
                     if (p.up) {
                         val remaining = p.minHoldMs - (now - p.firstAt)
                         seg = if (remaining <= cfg.segmentMs || alone) {
@@ -243,21 +291,23 @@ class TouchPlanner(
                             Segment(id, p.lastX, p.lastY, tx, ty, 0, cfg.segmentMs, true, true)
                         }
                         needed = true
-                    } else if (moved) {
+                    } else if (!atRest(p, tx, ty)) {
                         seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, cfg.segmentMs, true, true)
                         needed = true
                     } else {
-                        val refresh = cfg.idleRefreshMs > 0 && now - p.lastDispatchAt >= cfg.idleRefreshMs
-                        if (refresh) needed = true
-                        seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, cfg.holdSegmentMs, true, true)
+                        if (cfg.holdPeriodMs >= 0 && now - p.lastSegmentAt >= cfg.holdPeriodMs) needed = true
+                        seg = Segment(id, p.lastX, p.lastY, p.lastX, p.lastY, 0, cfg.holdSegmentMs, true, true)
                     }
                 } else {
                     val start = if (open > 0) cfg.newStrokeDelayMs else 0L
+                    // Encosta no ponto do DOWN e arrasta até o destino (a câmera recomeçada fica onde estava).
+                    val fx = if (p.relative && p.restarted) tx else clampX(p.ox)
+                    val fy = if (p.relative && p.restarted) ty else clampY(p.oy)
                     seg = if (p.up && alone) {
                         // DOWN e UP já chegaram: um toque completo num stroke só
-                        Segment(id, tx, ty, tx, ty, start, maxOf(cfg.finalMs, p.minHoldMs), false, false)
+                        Segment(id, fx, fy, tx, ty, start, maxOf(cfg.finalMs, p.minHoldMs), false, false)
                     } else {
-                        Segment(id, tx, ty, tx, ty, start, cfg.segmentMs, true, false)
+                        Segment(id, fx, fy, tx, ty, start, cfg.segmentMs, true, false)
                     }
                     needed = true
                 }
@@ -266,9 +316,38 @@ class TouchPlanner(
             }
         }
         if (!needed) return null
+        if (open > 0 && !assignSystemIds(out, commit = false)) {
+            // Um dedo novo receberia um id já usado por outro dedo no chão: levanta e re-encosta todos antes.
+            recycleNeeded = true
+            recycles++
+            return dispatch(planRecycle(now), now, recycle = true)
+        }
+        assignSystemIds(out, commit = true)
+        return dispatch(ensureEvent(out), now, recycle = false)
+    }
+
+    /** Fim de todos os dedos no chão (UP de verdade); os que continuam segurados recomeçam no próximo gesture. */
+    private fun planRecycle(now: Long): List<Segment> {
+        val out = ArrayList<Segment>()
+        for (id in 0 until MAX_POINTERS) {
+            val p = queues[id]?.firstOrNull() ?: continue
+            if (!p.open) continue
+            val dur = if (p.up) maxOf(cfg.finalMs, p.minHoldMs - (now - p.firstAt)) else cfg.finalMs
+            p.recycling = !p.up
+            out.add(Segment(id, p.lastX, p.lastY, clampX(p.tx), clampY(p.ty), 0, dur, false, true))
+        }
+        return out
+    }
+
+    private fun dispatch(out: List<Segment>, now: Long, recycle: Boolean): Gesture? {
+        if (out.isEmpty()) {
+            recycleNeeded = false
+            return null
+        }
         for (s in out) {
             val p = queues[s.pointer]!!.first()
             p.flight = s
+            p.lastSegmentAt = now
             if (!p.started) {
                 p.started = true
                 p.firstAt = now + s.startMs
@@ -277,7 +356,59 @@ class TouchPlanner(
         inFlight = true
         gestures++
         segments += out.size
-        return Gesture(out)
+        return Gesture(out, recycle)
+    }
+
+    /**
+     * Gesture só de dedos parados não gera MotionEvent e o sistema o recusa: o 1º dedo parado faz o micro-movimento
+     * (vai [Config.keepAlivePx] px e volta no próximo; um MOVE basta para o gesture valer).
+     */
+    private fun ensureEvent(out: ArrayList<Segment>): List<Segment> {
+        if (out.any { it.producesEvent }) return out
+        for ((i, s) in out.withIndex()) {
+            val p = queues[s.pointer]!!.first()
+            val ax = clampX(p.tx)
+            val ay = clampY(p.ty)
+            val (nx, ny) = if (s.fromX != ax || s.fromY != ay) {
+                ax to ay // volta ao ponto exato
+            } else {
+                val d = cfg.keepAlivePx.coerceAtLeast(1)
+                when {
+                    ax + d <= maxX -> (ax + d) to ay
+                    ax - d >= 0 -> (ax - d) to ay
+                    ay + d <= maxY -> ax to (ay + d)
+                    ay - d >= 0 -> ax to (ay - d)
+                    else -> continue
+                }
+            }
+            out[i] = Segment(s.pointer, s.fromX, s.fromY, nx, ny, s.startMs, s.durationMs, s.willContinue, s.continues)
+            return out
+        }
+        return out
+    }
+
+    /**
+     * Prevê os ids que o sistema dará aos strokes novos (menor id livre na sequência; esgotados 0..cap-1, todos
+     * recebem cap). false = algum colidiria com um dedo no chão ou com outro novo.
+     */
+    private fun assignSystemIds(out: List<Segment>, commit: Boolean): Boolean {
+        val cap = cfg.systemPointerIdCap
+        if (cap <= 0) return true
+        val used = if (commit) sysUsed else sysUsed.copyOf()
+        val live = HashSet<Int>()
+        for (id in 0 until MAX_POINTERS) {
+            val p = queues[id]?.firstOrNull() ?: continue
+            if (p.open && p.sysId >= 0) live += p.sysId
+        }
+        for (s in out) {
+            if (s.continues) continue
+            var sid = 0
+            while (sid < cap && used[sid]) sid++
+            if (!live.add(sid)) return false
+            used[sid] = true
+            if (commit) queues[s.pointer]!!.first().sysId = sid
+        }
+        return true
     }
 
     /** O gesture em voo terminou normalmente. */
@@ -291,12 +422,12 @@ class TouchPlanner(
             val s = p.flight ?: continue
             p.flight = null
             if (!s.willContinue) {
-                q.removeFirst() // levantou de verdade: só agora sai do mapa
+                if (p.recycling && !p.up) restart(p) else q.removeFirst() // levantou de verdade: só agora sai do mapa
+                p.recycling = false
             } else {
                 p.open = true
                 p.lastX = s.toX
                 p.lastY = s.toY
-                p.lastDispatchAt = now
             }
         }
     }
@@ -307,17 +438,19 @@ class TouchPlanner(
      */
     fun cancelled(now: Long) {
         inFlight = false
+        recycleNeeded = false
         for (id in 0 until MAX_POINTERS) {
             val q = queues[id] ?: continue
             val p = q.firstOrNull() ?: continue
             val s = p.flight
             p.flight = null
+            val recycling = p.recycling
+            p.recycling = false
             if (!p.started) continue
-            if (p.up || (s != null && !s.willContinue)) {
+            if (p.up || (s != null && !s.willContinue && !recycling)) {
                 q.removeFirst()
             } else {
-                p.started = false
-                p.open = false
+                restart(p)
             }
         }
         cancels++
@@ -327,6 +460,7 @@ class TouchPlanner(
     /** dispatchGesture recusou (serviço desligado): esquece tudo. */
     fun dispatchFailed() {
         inFlight = false
+        recycleNeeded = false
         for (q in queues) q?.clear()
     }
 
@@ -337,11 +471,12 @@ class TouchPlanner(
     fun wakeAt(now: Long): Long {
         if (inFlight) return Long.MAX_VALUE
         var at = Long.MAX_VALUE
+        if (recycleNeeded) at = now
         for (id in 0 until MAX_POINTERS) {
             val q = queues[id] ?: continue
             val p = q.firstOrNull() ?: continue
-            if (!p.open || p.up || !p.started || clampX(p.tx) != p.lastX || clampY(p.ty) != p.lastY) at = minOf(at, now) // há trabalho já
-            else if (cfg.idleRefreshMs > 0) at = minOf(at, p.lastDispatchAt + cfg.idleRefreshMs)
+            if (!p.open || p.up || !p.started || !atRest(p, clampX(p.tx), clampY(p.ty))) at = minOf(at, now) // há trabalho já
+            else if (cfg.holdPeriodMs >= 0) at = minOf(at, p.lastSegmentAt + cfg.holdPeriodMs)
             if (deadmanMs > 0) for (x in q) if (x.gen > 0 && !x.up) at = minOf(at, x.lastRefresh + deadmanMs + 1)
         }
         if (at != Long.MAX_VALUE && at < backoffUntil) at = backoffUntil
@@ -360,6 +495,20 @@ class TouchPlanner(
     fun queued(id: Int): Int = queues.getOrNull(id)?.size ?: 0
 
     // ------------------------------------------------------------------ interno
+
+    /** No destino, ou a [Config.keepAlivePx] dele (micro-movimento): não precisa de segmento de movimento. */
+    private fun atRest(p: Press, tx: Int, ty: Int): Boolean {
+        val dx = abs(p.lastX - tx)
+        val dy = abs(p.lastY - ty)
+        return dx + dy <= cfg.keepAlivePx
+    }
+
+    private fun restart(p: Press) {
+        p.started = false
+        p.open = false
+        p.restarted = true
+        p.sysId = -1
+    }
 
     private fun livePress(id: Int): Press? {
         val q = queues[id] ?: return null

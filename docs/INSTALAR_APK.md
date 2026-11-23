@@ -101,7 +101,49 @@ com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou 
   funcionando. Com o app 0.3.0 o site funciona como antes.
 - Trocar de aba, Alt+Tab, abrir o menu do navegador, soltar o mouse fora da janela, sair do mouse travado ou trocar de
   modo soltam todos os dedos na hora.
-- O app 0.3.1 também gasta bem menos CPU com teclas seguradas (antes: ~60 gestos/s por dedo parado; agora ~4/s).
+- (0.3.1) Dedo parado gerava só ~4 gestos/s — essa economia causou os bugs "anda, para" e "esquerda + pular anda
+  para a direita"; o app 0.3.2 voltou ao fluxo contínuo (ver abaixo).
+
+### Toques no app 0.3.2 (correção de "anda, para" e de "A + Espaço anda para a direita")
+- **Causa** (lida no código do Android 14/15, `MotionEventInjector`): para manter um dedo "segurado", o app manda ao
+  Android um gesto de continuação de tempos em tempos. Com o dedo PARADO esse gesto não gera nenhum evento de toque e o
+  Android o **recusa**; o app 0.3.1 tratava a recusa como cancelamento e re-encostava os dedos — e o Android então
+  mandava ao jogo um **CANCEL** (soltar tudo) e um toque novo, a cada ~0,27 s (o personagem parava). No re-encostar os
+  dedos ganhavam ids novos (o dedo do joystick podia ficar com o id que antes era do pulo/câmera: alguns jogos passam a
+  ler o joystick na posição do botão de pular, à direita). Além disso, o Android só libera os ids quando TODOS os dedos
+  levantam e, gastos os ids 0..9, dá o id 10 a todo dedo novo: com WASD segurado e muitos toques (câmera/pulo), dois
+  dedos ficavam com o mesmo id.
+- **Correção**: todo gesto agora gera pelo menos um evento (dedo parado faz um micro-movimento de 1 pixel, vai e volta),
+  então o Android nunca recusa nem cancela; dedos segurados recebem um gesto a cada ~16 ms (fluxo contínuo, como um dedo
+  real; gasta mais CPU que a 0.3.1 — ~60 gestos/s enquanto houver tecla segurada — em troca de suavidade). Um toque novo
+  sempre encosta no ponto do DOWN (o centro do joystick) e arrasta. Antes que dois dedos fiquem com o mesmo id, o app
+  levanta e re-encosta todos de uma vez (um "piscar" de ~10 ms, raro: só com o joystick segurado por muito tempo e
+  muitos toques novos ao mesmo tempo).
+- Tudo isso foi verificado num **modelo** do Android (código do AOSP transcrito nos testes), não no aparelho: confira
+  com o diagnóstico abaixo.
+
+### Diagnóstico de toque (app 0.3.2)
+No app, marque **Diagnóstico de toque** (embaixo de **Parar**). Marcar zera os contadores; jogue um pouco, volte ao app
+e anote a linha (dá para selecionar e copiar):
+- **gestures**: total, média/s, pico/s e último segundo. Com uma tecla segurada, ~60/s é o esperado.
+- **cancelados (recusados)**: gestos cancelados pelo Android (recusados = cancelados em menos de 5 ms). Esperado: 0,
+  ou só quando você encosta o dedo de verdade na tela. Números altos = mande para o desenvolvedor.
+- **maior lacuna com dedo segurado**: maior intervalo entre dois gestos enquanto havia dedo pressionado (esperado:
+  < 50 ms; centenas de ms = o jogo ficou sem eventos).
+- **dedos**: ativos agora e pico. **reciclagens de ids**: quantas vezes todos os dedos foram re-encostados para não
+  repetir ids.
+
+### Ver os toques ao vivo ("Local do ponteiro")
+*Opções do desenvolvedor* (Xiaomi/HyperOS: *Configurações adicionais → Opções do desenvolvedor*) → seção **Entrada** →
+ligue **Local do ponteiro** (em inglês "Pointer location"; **Mostrar toques** é uma versão mais simples). Uma barra no
+topo mostra quantos dedos estão no chão (`P: 2/2`), a posição e a velocidade, e cada dedo desenha uma trilha com a
+cor/número do seu id. Com o jogo aberto, segure A e aperte Espaço várias vezes:
+- **Esperado (0.3.2)**: a trilha do joystick começa no centro, vai para a esquerda e fica lá (tremendo 1 px) sem se
+  interromper; o pulo aparece como um 2º dedo que entra e sai; o contador de dedos nunca cai a 0 enquanto A está
+  segurado.
+- **Bug (0.3.1)**: a trilha do joystick some e reaparece a cada ~0,3 s (CANCEL + toque novo), ou o número/cor do dedo
+  do joystick muda quando o pulo entra.
+Desligue a opção depois (ela também aparece no vídeo espelhado).
 
 ## Problemas comuns
 - **Acessibilidade bloqueada ("configurações restritas", Xiaomi/Android 13+):** toque no item bloqueado e confirme o aviso;

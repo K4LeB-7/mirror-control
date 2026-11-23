@@ -74,6 +74,23 @@ class MainActivity : AppCompatActivity() {
         b.stop.setOnClickListener {
             startService(Intent(this, ScreenShareService::class.java).setAction(ScreenShareService.ACTION_STOP))
         }
+        b.touchDiag.isChecked = prefs.getBoolean("touchDiag", false)
+        b.touchDiag.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean("touchDiag", on).apply()
+            // Ligar zera os contadores: jogue um pouco, volte aqui e mande os números.
+            if (on) GameAccessibilityService.instance?.injector?.resetStats()
+            showTouchDiag()
+        }
+    }
+
+    /** Linha "Diagnóstico de toque": contadores reais do injetor desde que a opção foi ligada. */
+    private fun showTouchDiag() {
+        val on = b.touchDiag.isChecked
+        b.touchDiagText.visibility = if (on) android.view.View.VISIBLE else android.view.View.GONE
+        if (!on) return
+        val injector = GameAccessibilityService.instance?.injector
+        b.touchDiagText.text = injector?.stats?.text(android.os.SystemClock.uptimeMillis())
+            ?: "Serviço de acessibilidade desligado: sem injetor de toques."
     }
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -83,10 +100,17 @@ class MainActivity : AppCompatActivity() {
             handler.postDelayed(this, 2000)
         }
     }
+    private val diagPoll = object : Runnable {
+        override fun run() {
+            showTouchDiag()
+            handler.postDelayed(this, 1000)
+        }
+    }
 
     override fun onResume() {
         super.onResume()
         handler.post(usbPoll)
+        handler.post(diagPoll)
         ScreenShareService.statusListener = { s -> runOnUiThread { showStatus(s) } }
         showStatus(ScreenShareService.status)
         val a11y = accessibilityEnabled()
@@ -103,6 +127,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         handler.removeCallbacks(usbPoll)
+        handler.removeCallbacks(diagPoll)
         ScreenShareService.statusListener = null
         super.onPause()
     }

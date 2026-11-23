@@ -11,8 +11,8 @@ android {
         applicationId = "com.mirror.gamecontrol"
         minSdk = 26          // StrokeDescription.continueStroke (toques contínuos) exige API 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.3.1"
+        versionCode = 11
+        versionName = "0.3.2"
     }
 
     // Keystore de debug fixa no repositório: todo APK futuro tem a mesma assinatura,
