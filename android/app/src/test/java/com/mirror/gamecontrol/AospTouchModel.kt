@@ -89,7 +89,8 @@ class AospTouchModel(val sampleMs: Int = 8, val ipcMs: Long = 1) {
 
     // ------------------------------------------------------------------ MotionEventInjector
 
-    class Ev(val time: Long, val action: Int, val index: Int, val ids: IntArray, val xs: IntArray, val ys: IntArray) {
+    /** [strokes]: stroke (id do GestureDescription) de cada ponteiro do evento (instrumentação das medições). */
+    class Ev(val time: Long, val action: Int, val index: Int, val ids: IntArray, val xs: IntArray, val ys: IntArray, val strokes: IntArray = IntArray(0)) {
         fun name() = when (action) { DOWN -> "DOWN"; UP -> "UP"; MOVE -> "MOVE"; CANCEL -> "CANCEL"; PDOWN -> "PDOWN"; PUP -> "PUP"; else -> "?" }
         override fun toString() = "t=$time ${name()}[$index] " + ids.indices.joinToString(" ") { "#${ids[it]}(${xs[it]},${ys[it]})" }
     }
@@ -255,7 +256,9 @@ class AospTouchModel(val sampleMs: Int = 8, val ipcMs: Long = 1) {
         val ids = IntArray(size)
         val xs = IntArray(size)
         val ys = IntArray(size)
+        val st = IntArray(size)
         for (i in 0 until size) {
+            st[i] = last[i].strokeId
             var id = strokeToPointer[last[i].strokeId] ?: -1
             if (id == -1) {
                 id = unusedPointerId()
@@ -266,7 +269,7 @@ class AospTouchModel(val sampleMs: Int = 8, val ipcMs: Long = 1) {
             ys[i] = last[i].y
             maxPointerIdSeen = maxOf(maxPointerIdSeen, id)
         }
-        return Ev(t, action, index, ids, xs, ys)
+        return Ev(t, action, index, ids, xs, ys, st)
     }
 
     private fun unusedPointerId(): Int {
@@ -385,6 +388,17 @@ class AospSim(
     val w: Int = 2712, val h: Int = 1220,
     sampleMs: Int = 8,
     floating: Boolean = false,
+    ipcMs: Long = 1,
+    /**
+     * true = como o TouchInjector 0.3.3: os pacotes que já chegaram são todos aplicados antes do próximo `pump`
+     * (fila + um único "drain"); false = como a 0.3.2 (cada pacote faz o seu `pump`).
+     */
+    val batchInput: Boolean = false,
+    /**
+     * Experimento de "pipelining" (> 0): o próximo gesture é planejado e despachado [pipelineLeadMs] ms ANTES do fim
+     * previsto do gesture em voo (o modelo do AOSP o enfileira atrás do anterior). 0 = desligado (o real).
+     */
+    val pipelineLeadMs: Long = 0,
 ) {
     var now = 0L
     private class Task(val at: Long, val order: Long, val f: () -> Unit)
@@ -392,7 +406,7 @@ class AospSim(
     private val tasks = PriorityQueue<Task>(compareBy<Task>({ it.at }, { it.order }))
     fun at(t: Long, f: () -> Unit) { tasks.add(Task(maxOf(t, now), order++, f)) }
 
-    val model = AospTouchModel(sampleMs)
+    val model = AospTouchModel(sampleMs, ipcMs)
     val joyC = (0.14f * (w - 1)).roundToInt() to (0.68f * (h - 1)).roundToInt()
     val joyR = (0.16f * minOf(w, h)).roundToInt()
     val game = FakeGame(joyC.first, joyC.second, joyR, (0.18f * minOf(w, h)).roundToInt(), floating)
@@ -404,6 +418,16 @@ class AospSim(
     val buildErrors = ArrayList<String>()
     /** Início de cada gesture despachado (para medir lacunas). */
     val dispatchTimes = ArrayList<Long>()
+    /** stroke do modelo → ponteiro do protocolo (instrumentação). */
+    val strokePointer = HashMap<Int, Int>()
+    /** Strokes que são o FIM de uma reciclagem (o UP deles não é do usuário). */
+    val recycleStrokes = HashSet<Int>()
+    /** Chamado a cada pacote aplicado ao planejador (instrumentação): ação, ponteiro, gen, instante. */
+    var onPacket: (Int, Int, Int, Long) -> Unit = { _, _, _, _ -> }
+    /** Bytes alocados pela thread dentro de planner.plan/completed (medição; -1 se a JVM não informa). */
+    var allocBytes = 0L
+    var segmentsDispatched = 0L
+    private var inputDirty = false
 
     init {
         planner.setBounds(w - 1, h - 1)
@@ -411,9 +435,18 @@ class AospSim(
         model.onEvent = { game.onEvent(it) }
     }
 
+    private val mx: java.lang.management.ThreadMXBean? = java.lang.management.ManagementFactory.getThreadMXBean()
+    private fun allocated(): Long = try {
+        (mx as? com.sun.management.ThreadMXBean)?.getThreadAllocatedBytes(Thread.currentThread().id) ?: -1
+    } catch (_: Throwable) { -1 }
+
     fun pump() {
         if (planner.inFlight) return
-        val g = planner.plan(now) ?: return
+        val a0 = allocated()
+        val g = planner.plan(now)
+        val a1 = allocated()
+        if (a0 >= 0 && a1 >= 0) allocBytes += a1 - a0
+        if (g == null) return
         val built = ArrayList<AospTouchModel.Stroke>()
         val next = strokes.copyOf()
         try {
@@ -424,6 +457,8 @@ class AospSim(
                 } else model.newStroke(s.fromX, s.fromY, s.toX, s.toY, s.startMs, s.durationMs, s.willContinue)
                 built += st
                 next[s.pointer] = st
+                strokePointer[st.id] = s.pointer
+                if (g.recycle && !s.willContinue) recycleStrokes += st.id
             }
         } catch (e: Exception) {
             buildErrors += "t=$now $e $g"
@@ -434,12 +469,26 @@ class AospSim(
         val token = Any()
         current = token
         dispatched++
+        segmentsDispatched += g.segments.size
         dispatchTimes += now
         model.inject(built, now) { ok ->
             if (current === token) {
                 current = null
+                val c0 = allocated()
                 if (ok) planner.completed(now) else { cancelledCallbacks++; planner.cancelled(now) }
+                val c1 = allocated()
+                if (c0 >= 0 && c1 >= 0) allocBytes += c1 - c0
                 pump()
+            }
+        }
+        if (pipelineLeadMs > 0) {
+            // fim previsto: o sistema recebe em now+ipc e o último evento sai `durationMs` depois
+            at(now + model.ipcMs + g.durationMs - pipelineLeadMs) {
+                if (current === token) {
+                    current = null
+                    planner.completed(now)
+                    pump()
+                }
             }
         }
     }
@@ -450,6 +499,7 @@ class AospSim(
     fun packet(action: Int, pointer: Int, nx: Float, ny: Float, dx: Float = 0f, dy: Float = 0f, gen: Int = 0) {
         val x = nx * (w - 1)
         val y = ny * (h - 1)
+        onPacket(action, pointer, gen, now)
         when (action) {
             InputProtocol.DOWN -> planner.down(pointer, x, y, now, gen, if (pointer == 9) 0 else planner.cfg.minTapMs)
             InputProtocol.MOVE -> planner.move(pointer, x, y, now)
@@ -460,7 +510,7 @@ class AospSim(
             }
             InputProtocol.RELEASE_ALL -> planner.releaseAll()
         }
-        pump()
+        if (batchInput) inputDirty = true else pump()
     }
 
     /** Avança [ms] milissegundos; [each] roda a cada ms (amostragem dos testes). */
@@ -473,6 +523,10 @@ class AospSim(
                 if (t.at > now) break
                 tasks.poll()
                 t.f()
+            }
+            if (inputDirty) {
+                inputDirty = false
+                pump()
             }
             if (now >= lookIdleAt) {
                 lookIdleAt = Long.MAX_VALUE
