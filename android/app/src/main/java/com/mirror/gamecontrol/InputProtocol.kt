@@ -23,7 +23,7 @@ object InputProtocol {
      * Celular → site (canal ctrl / CTRL do USB), ao abrir a conexão: entrada v2 = gerações + deadman. O site então
      * manda `{"type":"input","deadmanMs":N}` e passa a enviar DOWN/UP redundantes e keepalive.
      */
-    const val CAPS_JSON = "{\"type\":\"caps\",\"input\":2}"
+    const val CAPS_JSON = InputCtrl.CAPS_JSON
 
     data class Packet(
         val action: Int,

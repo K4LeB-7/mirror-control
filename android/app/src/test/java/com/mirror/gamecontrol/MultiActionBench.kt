@@ -33,6 +33,9 @@ class MultiActionBench(
     val floating: Boolean = false,
     val camera: Boolean = true,
     val buttons: Boolean = true,
+    val joystick: Boolean = true,
+    val debug: Boolean = false,
+    val debugFrom: Long = -1, val debugTo: Long = -1,
 ) {
     class Stat {
         private val v = ArrayList<Long>()
@@ -69,6 +72,7 @@ class MultiActionBench(
         val pendingDownPair = BooleanArray(16)
         val pendingUp = Array(16) { ArrayDeque<Long>() }
         val downDeliveredAt = LongArray(16) { -1 }
+        val userDowns = HashSet<Pair<Int, Long>>()
         var joyTarget: Pair<Int, Int>? = null
         var joyTargetAt = 0L
         var lookPendingAt = -1L
@@ -76,7 +80,9 @@ class MultiActionBench(
         val minTap = planner.cfg.minTapMs
         val pairNext = BooleanArray(16) // próximo DOWN deste ponteiro é a 2ª+ tecla de uma rajada "junta"
 
+        if (debug) sim.onDispatch = { t, g -> if (t in debugFrom..debugTo) println("  G t=$t $g") }
         sim.onPacket = { a, p, gen, t ->
+            if (debug && t in debugFrom..debugTo) println("  P t=$t a=$a p=$p gen=$gen")
             when (a) {
                 InputProtocol.DOWN -> if (gen > lastGen[p]) {
                     lastGen[p] = gen
@@ -115,6 +121,7 @@ class MultiActionBench(
                     if (pendingDownPair[subject]) pairSecond.add(l)
                     pendingDown[subject] = -1
                     downDeliveredAt[subject] = t
+                    userDowns += subject to t
                 }
                 if (subject == 0) {
                     if (joyDown) maxGap = maxOf(maxGap, 0)
@@ -125,7 +132,9 @@ class MultiActionBench(
                 val q = pendingUp[subject]
                 if (q.isNotEmpty()) {
                     val arrived = q.removeFirst()
-                    up.add(t - maxOf(arrived, downDeliveredAt[subject] + minTap))
+                    val ul = t - maxOf(arrived, downDeliveredAt[subject] + minTap)
+                    // (DOWN entregue depois do UP chegar = toques enfileirados no mesmo ponteiro: par trocado, ignora)
+                    if (downDeliveredAt[subject] <= arrived) up.add(ul)
                     if (subject == 0) { joyDown = false; lastJoyEventAt = -1 }
                 } else if (subject == 0) {
                     blinks++ // UP do joystick que o usuário não pediu (reciclagem)
@@ -193,7 +202,7 @@ class MultiActionBench(
 
         while (sim.now < end) {
             val t = sim.now
-            if (t >= nextJoy) {
+            if (joystick && t >= nextJoy) {
                 if (joy != null && rnd.nextInt(100) < 15) {
                     joy = null
                     site.joystick(0, 0)
@@ -254,9 +263,10 @@ class MultiActionBench(
         sim.run(1500)
         val stuck = sim.game.strict.fingers.size
 
-        // toques vistos por um jogo a 30 fps (fase aleatória): fração de toques de botão cujo intervalo DOWN..UP
-        // contém pelo menos uma amostra de quadro.
-        val taps = ArrayList<Pair<Long, Long>>()
+        // Toques de botão vistos por um jogo a 30 fps (fase aleatória): um toque do usuário (do DOWN dele até o UP
+        // dele; uma reciclagem no meio o divide em pedaços) é visto se algum pedaço contém uma amostra de quadro.
+        val presses = ArrayList<MutableList<Pair<Long, Long>>>()
+        val cur = HashMap<Int, MutableList<Pair<Long, Long>>>()
         val open = HashMap<Int, Long>()
         for (e in sim.game.events) {
             val st = when (e.action) {
@@ -266,18 +276,25 @@ class MultiActionBench(
             } ?: continue
             val p = sim.strokePointer[st] ?: continue
             if (p !in 1..7) continue
-            if (e.action == AospTouchModel.DOWN || e.action == AospTouchModel.PDOWN) open[p] = e.time
-            else open.remove(p)?.let { taps += it to e.time }
+            if (e.action == AospTouchModel.DOWN || e.action == AospTouchModel.PDOWN) {
+                if ((p to e.time) in userDowns || cur[p] == null) cur[p] = ArrayList<Pair<Long, Long>>().also { presses += it }
+                open[p] = e.time
+            } else open.remove(p)?.let { cur[p]?.add(it to e.time) }
         }
         val frame = 1000.0 / 30
         val phase = Random(seed + 99).nextDouble() * frame
         var seen = 0
         var minDur = Long.MAX_VALUE
-        for ((a, b) in taps) {
-            minDur = minOf(minDur, b - a)
-            val k = kotlin.math.ceil((a - phase) / frame)
-            if (phase + k * frame < b) seen++
+        var counted = 0
+        for (pieces in presses) {
+            if (pieces.isEmpty()) continue
+            counted++
+            val d = pieces.last().second - pieces.first().first
+            if (debug && d < planner.cfg.minTapMs) println("toque curto $d ms: $pieces")
+            minDur = minOf(minDur, d)
+            if (pieces.any { (a, b) -> phase + kotlin.math.ceil((a - phase) / frame) * frame < b }) seen++
         }
+        val taps = presses
 
         val secs = sim.now / 1000.0
         return Result(
@@ -285,7 +302,7 @@ class MultiActionBench(
             maxGap, blinks, outMs, heldMs,
             sim.game.cancels, sim.game.dropped.size, sim.game.inconsistencies.size, sim.model.rejectedEmpty + sim.model.rejectedContinue,
             sim.dispatched / secs, sim.segmentsDispatched.toDouble() / maxOf(1, sim.dispatched), sim.allocBytes.toDouble() / maxOf(1, sim.dispatched),
-            planner.recycles, stuck, if (taps.isEmpty()) 1.0 else seen.toDouble() / taps.size, if (taps.isEmpty()) -1 else minDur,
+            planner.recycles, stuck, if (counted == 0) 1.0 else seen.toDouble() / counted, if (counted == 0) -1 else minDur,
         )
     }
 

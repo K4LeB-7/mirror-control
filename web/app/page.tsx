@@ -36,12 +36,15 @@ import {
   saveStore,
   updateLayout,
 } from "@/lib/profiles";
-import { CtrlMessage, NavAction, RotateMode, parsePhoneCtrl } from "@/lib/protocol";
+import { CtrlMessage, FluidityProfile, NavAction, RotateMode, isFluidityProfile, parsePhoneCtrl } from "@/lib/protocol";
+import { LinkProbe, LinkSummary, PING_INTERVAL_MS } from "@/lib/linkProbe";
 import { RemoteSession, SessionState } from "@/lib/session";
 import type { UsbSession, UsbSessionState } from "@/lib/usbSession";
 import { ChannelOpener, UsbConnectError, requestUsbDevice } from "@/lib/usbTransport";
 
 const ROOM_KEY = "mirror-control.room";
+/** Perfil de fluidez escolhido na barra (balanced|smooth|eco). */
+const FLUIDITY_KEY = "mirror-control.fluidity";
 /** Margem entre o vídeo e as bordas do palco (px). */
 const STAGE_PAD = 8;
 
@@ -91,6 +94,13 @@ export default function Page() {
   const [stage, setStage] = useState({ w: 0, h: 0 });
   /** Desfazer do editor: layouts anteriores a excluir/limpar/restaurar (mais novo por último). */
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  /** Perfil de fluidez escolhido (localStorage) e o que o celular confirmou (app 0.3.3+; null = não confirmou). */
+  const [fluidity, setFluidity] = useState<FluidityProfile>("balanced");
+  const [phoneFluidity, setPhoneFluidity] = useState<{ profile: FluidityProfile; frameMs: number } | null>(null);
+  /** "caps" do celular: 0 = sem caps/antigo; 1 = v2 sem perfis (0.3.1/0.3.2); 2 = com perfis (0.3.3+). */
+  const [phoneLevel, setPhoneLevel] = useState(0);
+  const [link, setLink] = useState<LinkSummary | null>(null);
+  const probe = useRef(new LinkProbe());
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -132,6 +142,10 @@ export default function Page() {
     saveStore(storage(), loaded); // grava já a migração do formato antigo / o perfil padrão
     setStore(loaded);
     setSettings(loadSettings(storage()));
+    try {
+      const f = localStorage.getItem(FLUIDITY_KEY);
+      if (isFluidityProfile(f)) setFluidity(f);
+    } catch {}
   }, []);
 
   const notify = useCallback((text: string, ok = true) => setNotice({ text, ok, at: Date.now() }), []);
@@ -150,15 +164,31 @@ export default function Page() {
       if (s.type === "caps") {
         // app 0.3.1+: entrada v2. Guardado também para o controlador criado depois (o USB conecta antes dele).
         phoneCaps.current = s.input;
+        setPhoneLevel(s.input >= 2 ? (s.profile >= 1 ? 2 : 1) : 0);
         inputRef.current?.setPhoneCaps(s.input);
-      } else notify(s.text, s.ok);
+      } else if (s.type === "profile") setPhoneFluidity({ profile: s.profile, frameMs: s.frameMs });
+      else if (s.type === "pong") probe.current.onPong(s);
+      else notify(s.text, s.ok);
     },
     [notify]
   );
   /** Conexão nova com o celular: até ele mandar "caps", assume app antigo (sem redundância/keepalive). */
   const onPhoneConnect = useCallback(() => {
     phoneCaps.current = 0;
+    setPhoneLevel(0);
+    setPhoneFluidity(null);
+    probe.current.reset();
+    setLink(null);
     inputRef.current?.setPhoneCaps(0);
+  }, []);
+  const fluidityRef = useRef(fluidity);
+  fluidityRef.current = fluidity;
+  const changeFluidity = useCallback((p: FluidityProfile) => {
+    setFluidity(p);
+    try {
+      localStorage.setItem(FLUIDITY_KEY, p);
+    } catch {}
+    inputRef.current?.setProfile(p);
   }, []);
 
   // ---------------------------------------------------------------- modos do mouse
@@ -353,6 +383,9 @@ export default function Page() {
           notifyRef.current(`⚠ Limite de ${MAX_SIMULTANEOUS_BUTTONS} toques simultâneos do Android: solte um botão para apertar outro.`),
       });
       inputRef.current = input;
+      input.setProfile(fluidityRef.current); // vai ao celular junto com o deadman, quando o "caps" chegar
+      // Medições/E2E: só quando o teste pede (window.__mirrorExpose antes de carregar a página).
+      if ((window as unknown as { __mirrorExpose?: boolean }).__mirrorExpose) (window as unknown as { __mirrorInput?: InputController }).__mirrorInput = input;
       input.attach();
       if (phoneCaps.current) input.setPhoneCaps(phoneCaps.current);
       return input;
@@ -411,6 +444,18 @@ export default function Page() {
       usbSession.close();
     };
   }, [usbSession, makeInput]);
+
+  // Ping do enlace (1/s, só conectado): RTT e estimativa tecla→celular na barra. App antigo não responde ("—").
+  const linkUp = mode === "usb" ? usbState?.peer === "connected" : state.peer === "connected";
+  useEffect(() => {
+    if (!linkUp) return;
+    const t = setInterval(() => {
+      sinkRef.current?.sendCtrl(probe.current.ping());
+      const s = probe.current.summary();
+      setLink((old) => (old === s || (old && s && old.n === s.n && old.rttP50 === s.rttP50 && old.rttMax === s.rttMax) ? old : s));
+    }, PING_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [linkUp]);
 
   // Proporção do canvas = a do vídeo que o celular anunciou (INFO; muda ao girar).
   const usbInfo = usbState?.info;
@@ -767,6 +812,10 @@ export default function Page() {
         onShowControls={(v) => commitSettings({ ...settings, showControls: v })}
         quality={quality}
         onQuality={changeQuality}
+        fluidity={fluidity}
+        onFluidity={changeFluidity}
+        phoneFluidity={connected ? (phoneLevel === 2 ? phoneFluidity ?? "pending" : "old") : null}
+        link={connected ? link : null}
         exit={
           usbMode
             ? { label: "Sair do USB", onClick: leaveUsb }

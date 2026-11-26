@@ -51,7 +51,7 @@ const { InputController, TAP_MS } = await import("../lib/inputController.ts");
 
 type Pkt = { a: number; k: number; x: number; y: number; dx: number; dy: number; t: number };
 
-function setup(opts: { layout?: Layout; mode?: MouseMode; congested?: () => boolean } = {}) {
+function setup(opts: { layout?: Layout; mode?: MouseMode; congested?: () => boolean; reliable?: boolean } = {}) {
   let now = 0;
   const sent: Pkt[] = [];
   const ctrls: unknown[] = [];
@@ -66,6 +66,7 @@ function setup(opts: { layout?: Layout; mode?: MouseMode; congested?: () => bool
       ctrls.push(m);
     },
     congested: opts.congested,
+    reliable: opts.reliable,
   };
   const ic = new InputController(sink, {
     getLayout: () => state.layout,
@@ -277,7 +278,7 @@ test("legado (app sem caps): sem cópias; joystick reenvia a posição a cada 10
 test("entrada v2: CTRL input, DOWN/UP repetidos com a mesma geração e keepalive enquanto segura", () => {
   const { ic, sent, ctrls, key, tick } = setup();
   ic.setPhoneCaps(2);
-  assert.deepEqual(ctrls, [{ type: "input", deadmanMs: INPUT_V2.deadmanMs }]);
+  assert.deepEqual(ctrls, [{ type: "input", deadmanMs: INPUT_V2.deadmanMs, profile: "balanced" }]);
   key("keydown", "KeyW");
   tick(3000); // anda 3 s
   const downs = sent.filter((p) => p.a === Action.DOWN && p.k === 0);
@@ -912,4 +913,123 @@ test("fuzz com 20 botões (segurar/alternar/toque, teclas, mouse, roda, blur, ab
   t.diagnostic(`fuzz 20 botões: ${touches} toques de botão, ${limitHits} apertos acima do limite de 7`);
   assert.ok(touches > 2000, `toques de botão no fuzz: ${touches}`);
   assert.ok(limitHits > 0, "o fuzz chegou ao limite de 7 simultâneos");
+});
+
+// ---------------------------------------------------------------- site 0.3.3: USB sem redundância, perfis, ping
+
+test("USB (canal confiável) + app v2: deadman desligado, sem cópias de DOWN/UP e sem keepalive; WebRTC mantém", () => {
+  const usb = setup({ reliable: true });
+  usb.ic.setPhoneCaps(2);
+  assert.deepEqual(usb.ctrls, [{ type: "input", deadmanMs: 0, profile: "balanced" }]);
+  assert.equal(usb.ic.inputV2, true);
+  assert.equal(usb.ic.inputRedundant, false);
+  usb.key("keydown", "Space");
+  usb.key("keyup", "Space");
+  usb.tick(500);
+  assert.equal(seq(usb.sent), "D1 U1", "um DOWN e um UP, sem cópias");
+  const e = edges(usb.sent);
+  assert.ok(e[0].dx >= 1 && e[1].dx === e[0].dx, "a geração continua indo (regras do app)");
+  const n = usb.sent.length;
+  usb.key("keydown", "KeyW");
+  usb.tick(3000);
+  const held = usb.sent.slice(n);
+  assert.equal(held.filter((p) => p.a === Action.DOWN).length, 1, "nenhum keepalive");
+  assert.equal(held.filter((p) => p.a === Action.MOVE).length, 1, "MOVE só quando a direção muda");
+  usb.key("keyup", "KeyW");
+  usb.tick(300);
+  assert.equal(usb.sent.slice(n).filter((p) => p.a === Action.UP).length, 1);
+  assertBalanced(usb.sent);
+  usb.ic.detach();
+
+  const rtc = setup({ reliable: false });
+  rtc.ic.setPhoneCaps(2);
+  assert.deepEqual(rtc.ctrls, [{ type: "input", deadmanMs: INPUT_V2.deadmanMs, profile: "balanced" }]);
+  assert.equal(rtc.ic.inputRedundant, true);
+  rtc.key("keydown", "Space");
+  rtc.key("keyup", "Space");
+  rtc.tick(500);
+  assert.equal(edges(rtc.sent).length, 2 * (1 + INPUT_V2.redundancyMs.length), "WebRTC: cópias continuam");
+  rtc.ic.detach();
+});
+
+test("USB + app antigo (sem caps): comportamento antigo (sem CTRL input; joystick reenvia a posição)", () => {
+  const { ic, sent, ctrls, key, tick } = setup({ reliable: true });
+  key("keydown", "KeyW");
+  tick(500);
+  key("keyup", "KeyW");
+  tick(200);
+  assert.equal(ctrls.length, 0);
+  assert.equal(seq(sent), "D0 U0");
+  assert.ok(sent.filter((p) => p.a === Action.MOVE).length >= 5, "MOVE a cada 100 ms, como antes");
+  ic.detach();
+});
+
+test("perfil de fluidez: guardado antes do caps, enviado com o deadman depois dele e a cada troca", () => {
+  const { ic, ctrls } = setup({ reliable: true });
+  ic.setProfile("smooth");
+  assert.equal(ctrls.length, 0, "sem caps: nada (app antigo nunca recebe CTRL input)");
+  ic.setPhoneCaps(2);
+  assert.deepEqual(ctrls.at(-1), { type: "input", deadmanMs: 0, profile: "smooth" });
+  ic.setProfile("eco");
+  assert.deepEqual(ctrls.at(-1), { type: "input", deadmanMs: 0, profile: "eco" });
+  ic.setPhoneCaps(0); // conexão nova, ainda sem caps
+  ic.setProfile("balanced");
+  assert.equal(ctrls.length, 2);
+  ic.detach();
+});
+
+test("primeiro aperto de cada tecla sai na hora (o descanso do pool nunca atrasa; só escolhe o ponteiro)", () => {
+  const { ic, sent, key } = setup({ reliable: true });
+  ic.setPhoneCaps(2);
+  // 5 apertos/solturas seguidos no mesmo instante (relógio parado): cada DOWN/UP é enviado na própria chamada
+  for (const code of ["Space", "KeyC", "KeyR"]) {
+    const before = sent.length;
+    key("keydown", code);
+    assert.equal(sent.length, before + 1, `${code}: DOWN enviado sincronamente`);
+    key("keyup", code);
+    assert.equal(sent.length, before + 2, `${code}: UP enviado sincronamente`);
+  }
+  key("keydown", "Space"); // o ponteiro 1 acabou de ser solto: o pool escolhe outro, sem esperar
+  assert.equal(sent.at(-1)!.a, Action.DOWN);
+  assert.notEqual(sent.at(-1)!.k, 1);
+  ic.detach();
+});
+
+const { parsePhoneCtrl } = await import("../lib/protocol.ts");
+const { LinkProbe, linkText } = await import("../lib/linkProbe.ts");
+
+test("parsePhoneCtrl: caps 0.3.1 e 0.3.3, perfil aplicado e pong", () => {
+  assert.deepEqual(parsePhoneCtrl('{"type":"caps","input":2}'), { type: "caps", input: 2, profile: 0, ping: 0 });
+  assert.deepEqual(parsePhoneCtrl('{"type":"caps","input":2,"profile":1,"ping":1}'), { type: "caps", input: 2, profile: 1, ping: 1 });
+  assert.deepEqual(parsePhoneCtrl('{"type":"status","scope":"profile","ok":true,"profile":"smooth","frameMs":8,"text":"Fluidez no celular: Máxima fluidez (quadro 8 ms)"}'), {
+    type: "profile", profile: "smooth", frameMs: 8, text: "Fluidez no celular: Máxima fluidez (quadro 8 ms)",
+  });
+  assert.deepEqual(parsePhoneCtrl('{"type":"pong","t":1234.567,"p":42,"d":2.5,"profile":"eco"}'), { type: "pong", t: 1234.567, p: 42, d: 2.5, profile: "eco" });
+  assert.equal(parsePhoneCtrl('{"type":"pong"}'), null);
+  assert.equal(parsePhoneCtrl('{"type":"status","scope":"rotate","ok":false,"text":"x"}')!.type, "status");
+});
+
+test("LinkProbe: RTT mediana/p95/máx dos últimos 20, estimativa tecla→celular, pong alheio ignorado, app antigo = —", () => {
+  let now = 100;
+  const p = new LinkProbe(() => now);
+  assert.equal(p.summary(), null);
+  assert.equal(linkText(p.summary()), "Enlace: —");
+  for (let i = 0; i < 25; i++) {
+    const m = p.ping();
+    assert.equal(m.type, "ping");
+    now += 2 + (i % 5); // RTT 2..6 ms
+    assert.equal(p.onPong({ type: "pong", t: m.t, p: 300, d: 1.5 }), true);
+    now += 1000;
+  }
+  assert.equal(p.onPong({ type: "pong", t: 1, p: 0, d: 0 }), false, "pong de um ping que não é deste site");
+  const s = p.summary()!;
+  assert.equal(s.n, 20);
+  assert.equal(s.rttP50, 4);
+  assert.equal(s.rttMax, 6);
+  assert.ok(Math.abs(s.appMs - 0.3) < 1e-9);
+  assert.ok(Math.abs(s.keyToPhoneMs - 2.3) < 1e-9);
+  assert.equal(s.phoneDispatchMs, 1.5);
+  assert.match(linkText(s), /^Enlace: RTT 4,0 ms \(p95 6,0 · máx 6,0\) · tecla→celular ≈ 2,3 ms · celular→toque 1,5 ms$/);
+  p.reset();
+  assert.equal(p.summary(), null);
 });

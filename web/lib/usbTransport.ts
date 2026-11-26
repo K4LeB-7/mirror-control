@@ -26,8 +26,12 @@ export type UsbErrorCode =
   | "OTHER";
 
 export class UsbConnectError extends Error {
-  constructor(public code: UsbErrorCode, message: string, public fatal = false) {
+  code: UsbErrorCode;
+  fatal: boolean;
+  constructor(code: UsbErrorCode, message: string, fatal = false) {
     super(message);
+    this.code = code;
+    this.fatal = fatal;
   }
 }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Process
 import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
@@ -207,7 +208,7 @@ class UsbStreamServer(
         old?.close("REPLACED: outra aba/navegador conectou com o PIN")
         // Navegador novo: zera gerações do injetor e anuncia a entrada v2 (o site antigo ignora o CTRL).
         GameAccessibilityService.instance?.injector?.newSession()
-        session.send(UsbWire.CTRL, InputProtocol.CAPS_JSON.toByteArray(Charsets.UTF_8))
+        session.send(UsbWire.CTRL, InputCtrl.CAPS_JSON.toByteArray(Charsets.UTF_8))
         session.startThreads()
         ctl.post { scheduleStart(session) }
     }
@@ -253,8 +254,11 @@ class UsbStreamServer(
         }
     }
 
-    private fun onCtrl(json: String, from: Session) {
+    private fun onCtrl(json: String, from: Session, receivedNs: Long) {
         val msg = try { JSONObject(json) } catch (_: Exception) { return }
+        // input (deadman/perfil) e ping: a resposta entra na fila de saída como qualquer CTRL (atrás de quadros de
+        // vídeo já enfileirados; ver "ping/pong" em docs/USB_PROTOCOLO.md)
+        if (InputCtrl.handle(msg, receivedNs) { reply -> if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8)) }) return
         when (msg.optString("type")) {
             // rotate / nav (app 0.3.0+). Girar dispara onDisplayChanged → encoder reinicia → INFO+CONFIG+KEY novos.
             "rotate", "nav" -> {
@@ -275,7 +279,6 @@ class UsbStreamServer(
                 }
             }
             "keyframe" -> encoder.requestKeyFrame()
-            "input" -> GameAccessibilityService.instance?.injector?.setDeadman(msg.optLong("deadmanMs", 0))
         }
     }
 
@@ -311,12 +314,19 @@ class UsbStreamServer(
         }
 
         private fun readLoop() {
+            // A thread de leitura dorme no socket; quando acorda é para entregar um toque ao injetor: prioridade de
+            // display (a mesma faixa das threads de UI), sem passar pela main thread.
+            try { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) } catch (_: Exception) {}
+            val scratch = UsbWire.Scratch()
             try {
                 while (!closing.get()) {
-                    val f = UsbWire.read(input) ?: break
+                    val f = UsbWire.read(input, scratch) ?: break
                     when (f.type) {
                         UsbWire.INPUT -> onInput(f.payload)
-                        UsbWire.CTRL -> onCtrl(String(f.payload, Charsets.UTF_8), this)
+                        UsbWire.CTRL -> {
+                            val t = System.nanoTime()
+                            onCtrl(String(f.payload, 0, f.length, Charsets.UTF_8), this, t)
+                        }
                         else -> {} // HELLO repetido / tipos desconhecidos: ignorados
                     }
                 }
@@ -329,7 +339,7 @@ class UsbStreamServer(
         }
 
         private fun onInput(bytes: ByteArray) {
-            val packet = InputProtocol.decode(bytes) ?: return
+            val packet = InputProtocol.decode(bytes) ?: return // decode copia os campos: o buffer pode ser reusado
             val injector = GameAccessibilityService.instance?.injector
             if (injector == null) {
                 if (!warnedNoAccessibility) {

@@ -37,7 +37,11 @@ import kotlin.math.roundToInt
  *   um toque direto no destino: um joystick "flutuante" leria zero). Depois de um cancelamento/reciclagem, toques
  *   "absolutos" (joystick, botões, mouse) recomeçam do ponto do DOWN; a câmera (relativa) recomeça onde estava.
  * - Dedo segurado recebe um segmento a cada [Config.holdPeriodMs] mesmo parado (fluxo contínuo de MOVE, como um
- *   dedo real; troca CPU x suavidade documentada em [Config]). MOVE/UP com nada em voo despacham na hora.
+ *   dedo real; troca CPU x suavidade documentada em [Config] e nos perfis [FluidityProfile]). MOVE/UP com nada em voo
+ *   despacham na hora.
+ * - 0.3.3 (perfis): segmentos curtos — movimento direto ao destino em [Config.moveSegmentMs], renovação parada em
+ *   [Config.holdSegmentMs], 1º segmento de botão em [Config.pressSegmentMs], toque mínimo esperado SEM gesture em voo
+ *   ([Config.idleWait]) — para que um DOWN/UP novo quase nunca espere o gesture anterior (só um pode estar em voo).
  * - Strokes novos entram em ordem crescente de ponteiro do protocolo (joystick 0 primeiro): depois de um
  *   recomeço o sistema re-atribui ids na ordem dos strokes, então o joystick fica sempre com o menor id.
  * - Proteção contra UP perdido (canal WebRTC sem retransmissão): DOWN/UP do site novo trazem uma geração (gen);
@@ -49,11 +53,31 @@ import kotlin.math.roundToInt
  */
 class TouchPlanner(
     private val maxStrokes: Int = 20,
-    val cfg: Config = Config(),
+    cfg: Config = FluidityProfile.BALANCED.config(8),
 ) {
+    /** Configuração atual (o perfil de fluidez pode trocá-la em tempo de execução: [setConfig]). */
+    var cfg: Config = cfg
+        private set
+
+    /**
+     * Valores padrão = comportamento da 0.3.2 (referência das medições, `Config()`); os perfis da 0.3.3 ficam em
+     * [FluidityProfile].
+     */
     data class Config(
-        /** Duração de um segmento normal (movimento, 1º segmento de um toque). */
+        /** 1º segmento de um toque novo que ARRASTA (DOWN num ponto, destino em outro: joystick, arrasto). */
         val segmentMs: Long = 16,
+        /**
+         * 1º segmento de um toque novo PARADO (botão: DOWN e destino no mesmo ponto). O DOWN sai no início do
+         * segmento; um segmento curto só libera mais cedo o próximo gesture (outra tecla apertada logo depois).
+         */
+        val pressSegmentMs: Long = 16,
+        /** Segmento de movimento de um dedo já no chão (o destino novo é entregue no FIM do segmento). */
+        val moveSegmentMs: Long = 16,
+        /**
+         * true (0.3.3): enquanto um toque solto espera o [minTapMs], nada fica em voo por causa dele (o final sai
+         * perto do fim do mínimo), então outra tecla não espera; false (0.3.2): o toque fica num segmento longo.
+         */
+        val idleWait: Boolean = false,
         /** Duração mínima de um toque, do 1º segmento até o fim do final (clique curto continua sendo clique). */
         val minTapMs: Long = 50,
         /** Menor duração do segmento final. */
@@ -132,6 +156,16 @@ class TouchPlanner(
     private var cancels = 0
     /** Ids de ponteiro que o sistema considera usados na sequência atual (só ficam livres quando todos levantam). */
     private val sysUsed = BooleanArray(maxOf(1, cfg.systemPointerIdCap + 1))
+    private val sysScratch = BooleanArray(sysUsed.size)
+    private val liveScratch = BooleanArray(sysUsed.size)
+
+    /**
+     * Troca a configuração (perfil de fluidez) em tempo de execução. Seguro a qualquer momento: só muda durações e
+     * cadências dos PRÓXIMOS segmentos (o teto de ids do sistema não muda).
+     */
+    fun setConfig(c: Config) {
+        cfg = c.copy(systemPointerIdCap = cfg.systemPointerIdCap)
+    }
     private var recycleNeeded = false
 
     var inFlight = false
@@ -250,6 +284,7 @@ class TouchPlanner(
     fun plan(now: Long): Gesture? {
         if (inFlight || now < backoffUntil) return null
         expireDeadman(now)
+        dropFinishedRestarts(now)
         var heads = 0
         var open = 0
         for (id in 0 until MAX_POINTERS) {
@@ -268,7 +303,7 @@ class TouchPlanner(
         }
         if (recycleNeeded) return dispatch(planRecycle(now), now, recycle = true)
 
-        val alone = heads == 1
+        val alone = heads == 1 && !cfg.idleWait
         val out = ArrayList<Segment>(heads)
         var needed = false
         var strokes = 0
@@ -282,7 +317,20 @@ class TouchPlanner(
                 val ty = clampY(p.ty)
                 val seg: Segment
                 if (p.open) {
-                    if (p.up) {
+                    if (p.up && cfg.idleWait) {
+                        val remaining = p.minHoldMs - (now - p.firstAt)
+                        if (remaining <= cfg.finalMs) {
+                            seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, maxOf(cfg.finalMs, remaining), false, true)
+                            needed = true
+                        } else if (!atRest(p, tx, ty)) {
+                            seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, minOf(cfg.moveSegmentMs, remaining - cfg.finalMs), true, true)
+                            needed = true
+                        } else {
+                            // espera o mínimo do toque SEM gesture em voo (o final sai em wakeAt); se outro dedo
+                            // precisar de um gesture antes, este só é continuado parado
+                            seg = Segment(id, p.lastX, p.lastY, p.lastX, p.lastY, 0, cfg.holdSegmentMs, true, true)
+                        }
+                    } else if (p.up) {
                         val remaining = p.minHoldMs - (now - p.firstAt)
                         seg = if (remaining <= cfg.segmentMs || alone) {
                             Segment(id, p.lastX, p.lastY, tx, ty, 0, maxOf(cfg.finalMs, remaining), false, true)
@@ -292,7 +340,7 @@ class TouchPlanner(
                         }
                         needed = true
                     } else if (!atRest(p, tx, ty)) {
-                        seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, cfg.segmentMs, true, true)
+                        seg = Segment(id, p.lastX, p.lastY, tx, ty, 0, cfg.moveSegmentMs, true, true)
                         needed = true
                     } else {
                         if (cfg.holdPeriodMs >= 0 && now - p.lastSegmentAt >= cfg.holdPeriodMs) needed = true
@@ -303,11 +351,12 @@ class TouchPlanner(
                     // Encosta no ponto do DOWN e arrasta até o destino (a câmera recomeçada fica onde estava).
                     val fx = if (p.relative && p.restarted) tx else clampX(p.ox)
                     val fy = if (p.relative && p.restarted) ty else clampY(p.oy)
-                    seg = if (p.up && alone) {
+                    val first = if (fx == tx && fy == ty) cfg.pressSegmentMs else cfg.segmentMs
+                    seg = if (p.up && (alone || (cfg.idleWait && p.minHoldMs <= first))) {
                         // DOWN e UP já chegaram: um toque completo num stroke só
                         Segment(id, fx, fy, tx, ty, start, maxOf(cfg.finalMs, p.minHoldMs), false, false)
                     } else {
-                        Segment(id, fx, fy, tx, ty, start, cfg.segmentMs, true, false)
+                        Segment(id, fx, fy, tx, ty, start, first, true, false)
                     }
                     needed = true
                 }
@@ -316,6 +365,7 @@ class TouchPlanner(
             }
         }
         if (!needed) return null
+        avoidEndAtNewStrokeStart(out)
         if (open > 0 && !assignSystemIds(out, commit = false)) {
             // Um dedo novo receberia um id já usado por outro dedo no chão: levanta e re-encosta todos antes.
             recycleNeeded = true
@@ -324,6 +374,20 @@ class TouchPlanner(
         }
         assignSystemIds(out, commit = true)
         return dispatch(ensureEvent(out), now, recycle = false)
+    }
+
+    /**
+     * Toque re-encostado por reciclagem/cancelamento cujo UP chegou antes de ele voltar ao chão e cujo pedaço já
+     * entregue durou o bastante para um jogo a 30 fps vê-lo ([VISIBLE_TAP_MS]): não volta a encostar. A 0.3.2 o
+     * re-pressionava por mais [Config.minTapMs] — um 2º toque que o usuário não fez (pulo duplo) e um UP atrasado.
+     */
+    private fun dropFinishedRestarts(now: Long) {
+        if (!cfg.idleWait) return
+        for (id in 0 until MAX_POINTERS) {
+            val q = queues[id] ?: continue
+            val p = q.firstOrNull() ?: continue
+            if (p.restarted && p.up && !p.started && p.flight == null && now - p.firstAt >= minOf(p.minHoldMs, VISIBLE_TAP_MS)) q.removeFirst()
+        }
     }
 
     /** Fim de todos os dedos no chão (UP de verdade); os que continuam segurados recomeçam no próximo gesture. */
@@ -350,7 +414,9 @@ class TouchPlanner(
             p.lastSegmentAt = now
             if (!p.started) {
                 p.started = true
-                p.firstAt = now + s.startMs
+                // Re-encostado (reciclagem/cancelamento) nos perfis 0.3.3: o toque mínimo conta do 1º DOWN de verdade
+                // (a 0.3.2 recomeçava a contagem: um UP que chegava logo depois esperava mais 50 ms).
+                if (!(p.restarted && cfg.idleWait)) p.firstAt = now + s.startMs
             }
         }
         inFlight = true
@@ -388,23 +454,43 @@ class TouchPlanner(
     }
 
     /**
+     * AOSP: o índice do POINTER_DOWN é a posição do stroke no PASSO (não na lista de dedos). Se um stroke termina no
+     * mesmo instante em que um novo começa, o passo ainda tem o que terminou e o índice aponta para o dedo errado
+     * (ou para fora do evento, que o InputDispatcher descarta). Segmentos curtos (perfis 0.3.3) podiam terminar em
+     * t = [Config.newStrokeDelayMs]: estende esses em 1 ms.
+     */
+    private fun avoidEndAtNewStrokeStart(out: ArrayList<Segment>) {
+        var start = -1L
+        for (s in out) if (!s.continues) { start = s.startMs; break }
+        if (start <= 0) return
+        for ((i, s) in out.withIndex()) {
+            if (s.continues && s.startMs + s.durationMs == start) {
+                out[i] = Segment(s.pointer, s.fromX, s.fromY, s.toX, s.toY, s.startMs, s.durationMs + 1, s.willContinue, s.continues)
+            }
+        }
+    }
+
+    /**
      * Prevê os ids que o sistema dará aos strokes novos (menor id livre na sequência; esgotados 0..cap-1, todos
      * recebem cap). false = algum colidiria com um dedo no chão ou com outro novo.
      */
     private fun assignSystemIds(out: List<Segment>, commit: Boolean): Boolean {
         val cap = cfg.systemPointerIdCap
         if (cap <= 0) return true
-        val used = if (commit) sysUsed else sysUsed.copyOf()
-        val live = HashSet<Int>()
+        // Sem alocar por gesture (0.3.3): buffers reaproveitados em vez de copyOf + HashSet.
+        val used = if (commit) sysUsed else sysScratch.also { sysUsed.copyInto(it) }
+        val live = liveScratch
+        live.fill(false)
         for (id in 0 until MAX_POINTERS) {
             val p = queues[id]?.firstOrNull() ?: continue
-            if (p.open && p.sysId >= 0) live += p.sysId
+            if (p.open && p.sysId >= 0 && p.sysId < live.size) live[p.sysId] = true
         }
         for (s in out) {
             if (s.continues) continue
             var sid = 0
             while (sid < cap && used[sid]) sid++
-            if (!live.add(sid)) return false
+            if (live[sid]) return false
+            live[sid] = true
             used[sid] = true
             if (commit) queues[s.pointer]!!.first().sysId = sid
         }
@@ -475,7 +561,11 @@ class TouchPlanner(
         for (id in 0 until MAX_POINTERS) {
             val q = queues[id] ?: continue
             val p = q.firstOrNull() ?: continue
-            if (!p.open || p.up || !p.started || !atRest(p, clampX(p.tx), clampY(p.ty))) at = minOf(at, now) // há trabalho já
+            val rest = atRest(p, clampX(p.tx), clampY(p.ty))
+            if (p.up && p.open && cfg.idleWait && rest) {
+                // toque solto esperando o mínimo: o final sai [finalMs] antes do fim do mínimo
+                at = minOf(at, maxOf(now, p.firstAt + p.minHoldMs - cfg.finalMs))
+            } else if (!p.open || p.up || !p.started || !rest) at = minOf(at, now) // há trabalho já
             else if (cfg.holdPeriodMs >= 0) at = minOf(at, p.lastSegmentAt + cfg.holdPeriodMs)
             if (deadmanMs > 0) for (x in q) if (x.gen > 0 && !x.up) at = minOf(at, x.lastRefresh + deadmanMs + 1)
         }
@@ -536,5 +626,7 @@ class TouchPlanner(
 
     companion object {
         const val MAX_POINTERS = 16
+        /** Um quadro de um jogo a 30 fps (+ folga): toque que já durou isso foi visto pelo jogo. */
+        const val VISIBLE_TAP_MS = 34L
     }
 }

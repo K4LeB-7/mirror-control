@@ -1,7 +1,7 @@
-import { Action, CtrlMessage } from "./protocol";
-import { ByteChannel, ChannelOpener, UsbConnectError } from "./usbTransport";
+import { Action, type CtrlMessage } from "./protocol.ts";
+import { type ByteChannel, type ChannelOpener, UsbConnectError } from "./usbTransport.ts";
 import {
-  Frame,
+  type Frame,
   FrameDecoder,
   FrameType,
   decodeText,
@@ -9,7 +9,7 @@ import {
   encodeText,
   hasNalType,
   parseVideoPayload,
-} from "./usbWire";
+} from "./usbWire.ts";
 
 export type UsbInfo = { width: number; height: number; fps: number; codec: string };
 
@@ -49,8 +49,19 @@ export class UsbSession {
   private channel: ByteChannel | null = null;
   private closed = false;
   private quality: CtrlMessage | null = null;
-  private writeChain: Promise<void> = Promise.resolve();
-  private pendingWrites = 0;
+  /**
+   * Fila de escrita (site 0.3.3): quadros esperando o write em andamento. Um write por vez no canal; o que chega
+   * enquanto ele está em andamento sai TODO junto no próximo (um write ADB = um WRTE + transferências USB e, em
+   * adbd sem "delayed ack", a espera do OKAY). Ordem estrita (FIFO único). Com o canal livre, o 1º quadro sai numa
+   * microtarefa: tudo o que o mesmo evento gera (ex.: DOWN + MOVE do joystick) vai num write só, sem esperar
+   * timer nem quadro.
+   */
+  private outQ: Uint8Array[] = [];
+  private outBytes = 0;
+  private writing = false;
+  private flushQueued = false;
+  /** Geração da fila: cada conexão nova começa com a fila vazia; um write antigo que termina depois não mexe nela. */
+  private wgen = 0;
 
   private canvas: HTMLCanvasElement | null = null;
   private ctx2d: CanvasRenderingContext2D | null = null;
@@ -65,9 +76,19 @@ export class UsbSession {
   private firstDrawn = false;
 
   /** Contadores para diagnóstico/testes. */
-  readonly stats = { received: 0, decoded: 0, drawn: 0, dropped: 0, skipped: 0, keyRequests: 0, connects: 0 };
+  readonly stats = { received: 0, decoded: 0, drawn: 0, dropped: 0, skipped: 0, keyRequests: 0, connects: 0, writes: 0, frames: 0, droppedMoves: 0 };
 
-  constructor(private opener: ChannelOpener, private pin: string, private l: Listeners) {
+  /** Canal confiável e ordenado (TCP pelo ADB): a entrada dispensa redundância/keepalive/deadman. */
+  readonly reliable = true;
+
+  private opener: ChannelOpener;
+  private pin: string;
+  private l: Listeners;
+
+  constructor(opener: ChannelOpener, pin: string, l: Listeners) {
+    this.opener = opener;
+    this.pin = pin;
+    this.l = l;
     void this.run();
   }
 
@@ -79,9 +100,9 @@ export class UsbSession {
     return this.state.peer === "connected";
   }
 
-  /** Escritas pendentes no USB: MOVE/LOOK esperam o próximo quadro em vez de enfileirar. */
+  /** Quadros esperando o USB: MOVE/LOOK esperam o próximo quadro de tela em vez de enfileirar. */
   congested() {
-    return this.pendingWrites > 8;
+    return this.outQ.length > 8;
   }
 
   /** O mesmo pacote de 18 bytes do WebRTC, num quadro INPUT. MOVE/LOOK podem ser descartados se o USB engasgar. */
@@ -149,10 +170,14 @@ export class UsbSession {
         ch.close();
         return;
       }
+      this.resetOut();
       this.channel = ch;
       this.stats.connects++;
       const fatal = await this.serve(ch);
-      if (this.channel === ch) this.channel = null;
+      if (this.channel === ch) {
+        this.channel = null;
+        this.resetOut();
+      }
       ch.close();
       this.resetVideo();
       if (this.closed) return;
@@ -242,15 +267,65 @@ export class UsbSession {
   }
 
   private write(bytes: Uint8Array, droppable = false) {
-    const ch = this.channel;
-    if (!ch) return;
-    if (droppable && this.pendingWrites > 32) return; // USB engasgado: perde um MOVE/LOOK, nunca DOWN/UP
-    this.pendingWrites++;
-    this.writeChain = this.writeChain
-      .then(() => (this.channel === ch ? ch.write(bytes) : undefined))
-      .catch(() => {}) // a leitura percebe a queda e reconecta
-      .finally(() => this.pendingWrites--);
+    if (!this.channel) return;
+    if (droppable && this.outQ.length > 32) {
+      this.stats.droppedMoves++; // USB engasgado: perde um MOVE/LOOK, nunca DOWN/UP
+      return;
+    }
+    this.outQ.push(bytes);
+    this.outBytes += bytes.length;
+    if (!this.writing && !this.flushQueued) {
+      this.flushQueued = true;
+      queueMicrotask(this.flush);
+    }
   }
+
+  private resetOut() {
+    this.wgen++;
+    this.writing = false;
+    this.outQ = [];
+    this.outBytes = 0;
+  }
+
+  private flush = () => {
+    this.flushQueued = false;
+    const ch = this.channel;
+    if (this.writing || !this.outQ.length) return;
+    if (!ch) {
+      this.outQ = [];
+      this.outBytes = 0;
+      return;
+    }
+    let buf: Uint8Array;
+    if (this.outQ.length === 1) buf = this.outQ[0];
+    else {
+      buf = new Uint8Array(this.outBytes);
+      let o = 0;
+      for (const b of this.outQ) {
+        buf.set(b, o);
+        o += b.length;
+      }
+    }
+    this.stats.frames += this.outQ.length;
+    this.stats.writes++;
+    this.outQ = [];
+    this.outBytes = 0;
+    this.writing = true;
+    const g = this.wgen;
+    const done = () => {
+      if (g !== this.wgen) return; // conexão antiga
+      this.writing = false;
+      if (this.outQ.length) this.flush(); // o que chegou durante o write sai já, junto
+    };
+    let p: Promise<void>;
+    try {
+      p = ch.write(buf);
+    } catch {
+      done();
+      return;
+    }
+    p.then(done, done); // erro: a leitura percebe a queda e reconecta
+  };
 
   // ---------------------------------------------------------------- vídeo
 

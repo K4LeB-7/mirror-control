@@ -1,5 +1,5 @@
 import { Action, INPUT_V2, POINTER_JOYSTICK, POINTER_LOOK, POINTER_MOUSE, encodePacket } from "./protocol.ts";
-import type { CtrlMessage } from "./protocol.ts";
+import type { CtrlMessage, FluidityProfile } from "./protocol.ts";
 import { clamp01, joystickOffset, keyBind, mouseBind, wheelBind } from "./layout.ts";
 import type { ButtonControl, ButtonMode, Layout } from "./layout.ts";
 import { isEditableTarget, wheelSwipe } from "./mouseModes.ts";
@@ -13,6 +13,11 @@ export type InputSink = {
   sendCtrl?(msg: CtrlMessage): void;
   /** Canal congestionado: MOVE/LOOK esperam o próximo quadro (DOWN/UP/keepalive nunca esperam). */
   congested?(): boolean;
+  /**
+   * Canal confiável e ordenado (USB/ADB = TCP): sem perda, então a entrada v2 dispensa as cópias de DOWN/UP, o
+   * keepalive e o deadman (site 0.3.3). Queda do cabo/socket = o celular solta tudo (releaseAll) sozinho.
+   */
+  readonly reliable?: boolean;
 };
 
 export type InputHooks = {
@@ -53,6 +58,9 @@ const STEP_MS = 16;
 /** Bits de MouseEvent.buttons por MouseEvent.button (0 esquerdo, 1 meio, 2 direito). */
 const BUTTON_BITS = [1, 4, 2];
 
+/** Tecla do joystick (sem criar array por evento: caminho keydown → envio). */
+const isJoyKey = (j: Layout["joystick"], code: string) => code === j.up || code === j.down || code === j.left || code === j.right;
+
 /** Botão pressionado: o ponteiro que ele RECEBEU do pool no DOWN (o UP vai sempre para este ponteiro). */
 type Active = { pointer: number; mode: ButtonMode; source: string };
 /** Dedo pressionado: geração do DOWN, ponto do DOWN e posição atual (joystick/arrasto). */
@@ -69,8 +77,9 @@ type Held = { gen: number; x: number; y: number; mx: number; my: number; movedSi
  *
  * Garantias: todo DOWN tem um UP (soltar a tecla/botão, ou blur/aba escondida/menu de contexto/troca de modo/
  * detach → releaseAll); o UP vai para o ponteiro que foi pressionado, mesmo se o layout mudou no meio. Entrada v2
- * (celular avisa com "caps"): DOWN/UP levam a geração, são repetidos ([INPUT_V2.redundancyMs]) e dedos segurados
- * recebem keepalive; o celular solta sozinho um dedo sem keepalive (UP perdido no WebRTC nunca prende).
+ * (celular avisa com "caps"): DOWN/UP levam a geração; no WebRTC (sem retransmissão) são repetidos
+ * ([INPUT_V2.redundancyMs]) e dedos segurados recebem keepalive — o celular solta sozinho um dedo sem keepalive (UP
+ * perdido nunca prende). No USB (TCP, [InputSink.reliable]) nada disso: um pacote por evento, deadman desligado.
  */
 export class InputController {
   private down = new Set<string>(); // KeyboardEvent.code pressionados (joystick)
@@ -82,6 +91,9 @@ export class InputController {
   private lastLimitNotice = -Infinity;
   private gen = 0;
   private v2 = false;
+  /** v2 num canal sem retransmissão (WebRTC): cópias de DOWN/UP + keepalive + deadman. */
+  private redundant = false;
+  private profile: FluidityProfile = "balanced";
   private keepTimer: ReturnType<typeof setInterval> | null = null;
   private joyActive = false;
   private lookDx = 0;
@@ -148,12 +160,33 @@ export class InputController {
   setPhoneCaps(input: number) {
     const v2 = input >= 2;
     this.v2 = v2;
-    if (v2) this.session.sendCtrl?.({ type: "input", deadmanMs: INPUT_V2.deadmanMs });
+    this.redundant = v2 && !this.session.reliable;
+    this.sendInputCtrl();
     this.syncKeepalive();
+  }
+
+  /**
+   * Perfil de fluidez pedido ao celular (app 0.3.3+; os anteriores ignoram o campo). Vai junto com o deadmanMs no
+   * mesmo CTRL "input" (um app 0.3.1/0.3.2 que lê só deadmanMs continua com o valor certo).
+   */
+  setProfile(p: FluidityProfile) {
+    this.profile = p;
+    this.sendInputCtrl();
+  }
+
+  /** Só depois do "caps" (app 0.3.1+): app antigo não recebe nada novo. WebRTC: deadman 500; USB: 0 (desligado). */
+  private sendInputCtrl() {
+    if (!this.v2) return;
+    this.session.sendCtrl?.({ type: "input", deadmanMs: this.redundant ? INPUT_V2.deadmanMs : 0, profile: this.profile });
   }
 
   get inputV2() {
     return this.v2;
+  }
+
+  /** Cópias de DOWN/UP + keepalive ligados (v2 num canal não confiável). */
+  get inputRedundant() {
+    return this.redundant;
   }
 
   /** Ponteiros pressionados agora (testes/diagnóstico). */
@@ -203,7 +236,7 @@ export class InputController {
   /** DOWN/UP: geração no campo dx e, no v2, cópias atrasadas (o celular ignora repetições). */
   private edge(a: typeof Action.DOWN | typeof Action.UP, k: number, x: number, y: number, gen: number) {
     this.send(a, k, x, y, gen);
-    if (!this.v2) return;
+    if (!this.redundant) return; // app antigo, ou USB (TCP não perde pacote)
     for (const d of INPUT_V2.redundancyMs) {
       const t = setTimeout(() => {
         this.echoes.delete(t);
@@ -244,11 +277,11 @@ export class InputController {
   }
 
   /**
-   * Keepalive (v2): enquanto há dedo segurado, reenvia DOWN(gen) e a posição atual. Sem v2 (app antigo), só o
-   * joystick tem a posição reenviada (o canal "input" não retransmite um MOVE perdido).
+   * Keepalive (v2 no WebRTC): enquanto há dedo segurado, reenvia DOWN(gen) e a posição atual. v2 no USB: nenhum
+   * (canal confiável; deadman desligado). Sem v2 (app antigo), só o joystick tem a posição reenviada, como antes.
    */
   private syncKeepalive() {
-    const need = this.v2 ? this.held.size > 0 : this.joyActive;
+    const need = this.redundant ? this.held.size > 0 : !this.v2 && this.joyActive;
     if (need && !this.keepTimer) this.keepTimer = setInterval(this.keepalive, INPUT_V2.keepaliveMs);
     else if (!need && this.keepTimer) {
       clearInterval(this.keepTimer);
@@ -257,7 +290,7 @@ export class InputController {
   }
 
   private keepalive = () => {
-    if (!this.v2) {
+    if (!this.redundant) {
       const j = this.held.get(POINTER_JOYSTICK);
       if (this.joyActive && j) this.send(Action.MOVE, POINTER_JOYSTICK, j.mx, j.my);
       return;
@@ -318,7 +351,7 @@ export class InputController {
     const layout = this.h.getLayout();
     let handled = false;
     const j = layout.joystick;
-    if (j.enabled !== false && [j.up, j.down, j.left, j.right].includes(e.code)) {
+    if (j.enabled !== false && isJoyKey(j, e.code)) {
       this.down.add(e.code);
       this.updateJoystick();
       handled = true;
@@ -337,7 +370,7 @@ export class InputController {
   private isMapped(code: string) {
     const l = this.h.getLayout();
     const j = l.joystick;
-    return (j.enabled !== false && [j.up, j.down, j.left, j.right].includes(code)) || l.buttons.some((b) => b.bind === keyBind(code));
+    return (j.enabled !== false && isJoyKey(j, code)) || l.buttons.some((b) => b.bind === keyBind(code));
   }
 
   // ---------------------------------------------------------------- mouse

@@ -43,7 +43,7 @@ class InputProtocolTest {
     }
 
     @Test fun capsJsonIsValid() {
-        assertEquals("{\"type\":\"caps\",\"input\":2}", InputProtocol.CAPS_JSON)
+        assertEquals("{\"type\":\"caps\",\"input\":2,\"profile\":1,\"ping\":1}", InputProtocol.CAPS_JSON)
     }
 
     @Test fun videoFrameFromByteBufferEqualsArrayVersion() {

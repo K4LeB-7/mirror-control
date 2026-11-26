@@ -318,6 +318,11 @@ class FakeGame(val joyX: Int, val joyY: Int, val joyRadius: Int, val zoneRadius:
             dropped += "ids duplicados: $e"
             return
         }
+        if (e.index !in e.ids.indices) {
+            // InputDispatcher (validateMotionEvent): índice da ação fora do evento → descartado
+            dropped += "índice da ação fora do evento: $e"
+            return
+        }
         events += e
         if (e.action == AospTouchModel.CANCEL) cancels++
         checkConsistency(e)
@@ -424,6 +429,7 @@ class AospSim(
     val recycleStrokes = HashSet<Int>()
     /** Chamado a cada pacote aplicado ao planejador (instrumentação): ação, ponteiro, gen, instante. */
     var onPacket: (Int, Int, Int, Long) -> Unit = { _, _, _, _ -> }
+    var onDispatch: (Long, TouchPlanner.Gesture) -> Unit = { _, _ -> }
     /** Bytes alocados pela thread dentro de planner.plan/completed (medição; -1 se a JVM não informa). */
     var allocBytes = 0L
     var segmentsDispatched = 0L
@@ -435,10 +441,15 @@ class AospSim(
         model.onEvent = { game.onEvent(it) }
     }
 
-    private val mx: java.lang.management.ThreadMXBean? = java.lang.management.ManagementFactory.getThreadMXBean()
-    private fun allocated(): Long = try {
-        (mx as? com.sun.management.ThreadMXBean)?.getThreadAllocatedBytes(Thread.currentThread().id) ?: -1
-    } catch (_: Throwable) { -1 }
+    // ThreadMXBean por reflexão (o classpath dos testes é o android.jar, sem java.lang.management).
+    private val allocFn: (() -> Long)? = try {
+        val mf = Class.forName("java.lang.management.ManagementFactory")
+        val bean = mf.getMethod("getThreadMXBean").invoke(null)
+        val m = Class.forName("com.sun.management.ThreadMXBean").getMethod("getThreadAllocatedBytes", Long::class.javaPrimitiveType)
+        val f: () -> Long = { m.invoke(bean, Thread.currentThread().id) as Long }
+        f().let { f }
+    } catch (_: Throwable) { null }
+    private fun allocated(): Long = allocFn?.invoke() ?: -1
 
     fun pump() {
         if (planner.inFlight) return
@@ -447,6 +458,7 @@ class AospSim(
         val a1 = allocated()
         if (a0 >= 0 && a1 >= 0) allocBytes += a1 - a0
         if (g == null) return
+        onDispatch(now, g)
         val built = ArrayList<AospTouchModel.Stroke>()
         val next = strokes.copyOf()
         try {

@@ -17,17 +17,41 @@ import android.util.Log
  * Roda numa thread própria ("touch-injector", prioridade de display), não na main thread: a UI do app e o
  * RtcClient não atrasam toques, e vice-versa. AccessibilityService.dispatchGesture é sincronizado internamente.
  *
- * Com dedo segurado há um gesture a cada ~16 ms (TouchPlanner.Config.holdPeriodMs): o jogo recebe um fluxo
- * contínuo de MOVE, como de um dedo real. [stats] alimenta a linha "Diagnóstico de toque" do app.
+ * Com dedo segurado há um gesture a cada holdPeriodMs do perfil de fluidez ([FluidityProfile]; 16 ms no
+ * Equilibrado): o jogo recebe um fluxo contínuo de MOVE, como de um dedo real. A cadência acompanha a taxa do display
+ * (relida a cada 500 ms). [stats] alimenta a linha "Diagnóstico de toque" do app (contadores + latências).
  */
 class TouchInjector(
     private val service: AccessibilityService,
     private val screen: () -> Pair<Int, Int>,
+    /** Taxa de atualização atual do display (Hz). O AOSP gera os passos dos gestures a cada 1000/Hz ms. */
+    private val refreshHz: () -> Float = { 60f },
 ) {
     private val thread = HandlerThread("touch-injector").apply { start() }
     private val handler = Handler(thread.looper)
     private val planner = TouchPlanner(maxStrokes = safeMaxStrokes())
     @Volatile private var closed = false
+
+    /** Perfil de fluidez pedido pelo site (CTRL input.profile). Só na thread do injetor. */
+    private var profile = FluidityProfile.BALANCED
+    private var frameMs = 0
+
+    // Fila de entrada (qualquer thread → injetor) sem alocar por pacote: anel sob trava + UM "drain" postado quando a
+    // fila sai de vazia. O drain aplica TODOS os pacotes que já chegaram e só então planeja (teclas que chegam juntas
+    // saem no mesmo gesture; 0.3.2 planejava a cada pacote).
+    private val qLock = Any()
+    private val qPackets = arrayOfNulls<InputProtocol.Packet>(QUEUE_CAP)
+    private val qAt = LongArray(QUEUE_CAP)
+    private var qHead = 0
+    private var qSize = 0
+    private var drainPosted = false
+    private val batch = arrayOfNulls<InputProtocol.Packet>(QUEUE_CAP) // só na thread do injetor
+    private val batchAt = LongArray(QUEUE_CAP)
+
+    // Latência (ns, relógio monotônico; só na thread do injetor). 0 = nada pendente.
+    private var pendingInputNs = 0L
+    private val downPendingNs = LongArray(TouchPlanner.MAX_POINTERS)
+    private var flightInputNs = 0L
 
     /** Contadores para o diagnóstico (escritos só nesta thread; lidos pela UI). */
     val stats = TouchStats()
@@ -47,6 +71,7 @@ class TouchInjector(
         wakeAt = Long.MAX_VALUE
         pump()
     }
+    private val drain = Runnable { drainInput() }
     /**
      * Callback que nunca chega (serviço desconectando, tela apagando, ROM que perde o callback) deixaria o
      * planejador "em voo" para sempre e nenhum toque sairia mais: depois do prazo, conta como cancelado.
@@ -69,6 +94,10 @@ class TouchInjector(
             if (g !== current) return
             handler.removeCallbacks(watchdog)
             current = null
+            if (flightInputNs != 0L) {
+                stats.inputToCompleted.add((System.nanoTime() - flightInputNs) / 1000)
+                flightInputNs = 0L
+            }
             planner.completed(now())
             pump()
         }
@@ -77,6 +106,7 @@ class TouchInjector(
             if (g !== current) return
             handler.removeCallbacks(watchdog)
             current = null
+            flightInputNs = 0L
             stats.onCancelled(now(), currentAt)
             planner.cancelled(now())
             pump()
@@ -86,19 +116,59 @@ class TouchInjector(
     init {
         handler.post {
             stats.reset(now())
+            stats.profile = profile.label
+            // Prioridade alta (o injetor dorme quase sempre; quando acorda é para um toque). URGENT_DISPLAY (-8) é a
+            // das threads de UI críticas; se a ROM recusar, fica a de display (-4) como na 0.3.2.
             try {
-                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY)
             } catch (e: Exception) {
-                Log.w(TAG, "prioridade da thread: $e")
+                try { Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY) } catch (e2: Exception) { Log.w(TAG, "prioridade da thread: $e2") }
             }
         }
     }
 
-    /** API pública: pode ser chamada de qualquer thread (ex.: thread do DataChannel / usb-read). */
+    /**
+     * API pública: pode ser chamada de qualquer thread (ex.: thread do DataChannel / usb-read). Não aloca (além do
+     * Packet já decodificado): entra no anel e, se ele estava vazio, posta o drain.
+     */
     fun handle(p: InputProtocol.Packet) {
         if (closed) return
-        handler.post { apply(p) }
+        val at = System.nanoTime()
+        var post = false
+        synchronized(qLock) {
+            if (qSize == QUEUE_CAP) {
+                // 256 pacotes sem o injetor rodar (thread travada?): descarta o mais velho, nunca bloqueia a leitura
+                qPackets[qHead] = null
+                qHead = (qHead + 1) % QUEUE_CAP
+                qSize--
+            }
+            val i = (qHead + qSize) % QUEUE_CAP
+            qPackets[i] = p
+            qAt[i] = at
+            qSize++
+            if (!drainPosted) { drainPosted = true; post = true }
+        }
+        if (post) handler.post(drain)
     }
+
+    /**
+     * Perfil de fluidez (CTRL `{"type":"input","profile":...}` do site 0.3.3). [onApplied] recebe (na thread do
+     * injetor) o perfil e o quadro do display efetivamente usados, para a resposta ao site.
+     */
+    fun setProfile(p: FluidityProfile, onApplied: (FluidityProfile, Int) -> Unit = { _, _ -> }) {
+        if (closed) return
+        handler.post {
+            if (p != profile) stats.clearLatency() // latências passam a ser só do perfil novo
+            profile = p
+            stats.profile = p.label
+            applyConfig()
+            onApplied(p, frameMs)
+            pump()
+        }
+    }
+
+    /** Mediana DOWN→dispatch (ms) medida no celular, para o pong (-1 sem amostras). */
+    fun downDispatchP50Ms(): Double = stats.downDispatchP50Ms()
 
     fun releaseAll() {
         if (closed) return
@@ -158,10 +228,45 @@ class TouchInjector(
             screenH = h
             planner.setBounds(w - 1, h - 1)
         }
+        // A taxa do display muda sozinha (HyperOS alterna 60/90/120 Hz): a cadência acompanha.
+        val f = FluidityProfile.frameMs(try { refreshHz() } catch (_: Exception) { 60f })
+        if (f != frameMs) {
+            frameMs = f
+            applyConfig()
+        }
         screenAt = t
     }
 
-    private fun apply(p: InputProtocol.Packet) {
+    private fun applyConfig() {
+        if (frameMs <= 0) frameMs = FluidityProfile.frameMs(try { refreshHz() } catch (_: Exception) { 60f })
+        planner.setConfig(profile.config(frameMs))
+        stats.frameMs = frameMs
+    }
+
+    private fun drainInput() {
+        var n: Int
+        synchronized(qLock) {
+            n = qSize
+            for (k in 0 until n) {
+                val i = (qHead + k) % QUEUE_CAP
+                batch[k] = qPackets[i]
+                batchAt[k] = qAt[i]
+                qPackets[i] = null
+            }
+            qHead = 0
+            qSize = 0
+            drainPosted = false
+        }
+        for (k in 0 until n) {
+            val p = batch[k] ?: continue
+            batch[k] = null
+            apply(p, batchAt[k])
+        }
+        pump()
+    }
+
+    /** Aplica um pacote ao planejador (sem planejar: o drain planeja uma vez depois do lote). */
+    private fun apply(p: InputProtocol.Packet, atNs: Long) {
         val t = now()
         refreshScreen(t)
         val w = screenW
@@ -169,22 +274,35 @@ class TouchInjector(
         if (w <= 0 || h <= 0) return
         val x = p.x * (w - 1)
         val y = p.y * (h - 1)
+        val id = p.pointer
+        val effective: Boolean
         when (p.action) {
-            InputProtocol.DOWN -> planner.down(p.pointer, x, y, t, p.gen, if (p.pointer == LOOK_POINTER) 0 else planner.cfg.minTapMs)
-            InputProtocol.MOVE -> planner.move(p.pointer, x, y, t)
-            InputProtocol.UP -> planner.up(p.pointer, t, p.gen)
+            InputProtocol.DOWN -> {
+                val before = planner.queued(id)
+                planner.down(id, x, y, t, p.gen, if (id == LOOK_POINTER) 0 else planner.cfg.minTapMs)
+                effective = planner.queued(id) > before // keepalive/cópia redundante não conta
+                if (effective && id < downPendingNs.size && downPendingNs[id] == 0L) downPendingNs[id] = atNs
+            }
+            InputProtocol.MOVE -> { planner.move(id, x, y, t); effective = planner.isHeld(id) }
+            InputProtocol.UP -> {
+                val held = planner.isHeld(id)
+                planner.up(id, t, p.gen)
+                effective = held && !planner.isHeld(id)
+            }
             InputProtocol.LOOK -> {
                 planner.look(LOOK_POINTER, x, y, p.dx * h, p.dy * h, LOOK_ZONE * minOf(w, h), t)
                 handler.removeCallbacks(lookIdle)
                 handler.postDelayed(lookIdle, LOOK_IDLE_MS)
+                effective = true
             }
             InputProtocol.RELEASE_ALL -> {
                 handler.removeCallbacks(lookIdle)
+                effective = planner.activeCount > 0
                 planner.releaseAll()
             }
             else -> return
         }
-        pump()
+        if (effective && pendingInputNs == 0L) pendingInputNs = atNs
     }
 
     private fun pump() {
@@ -217,7 +335,21 @@ class TouchInjector(
             current = null
             planner.dispatchFailed()
             strokes.fill(null)
+            pendingInputNs = 0L
+            downPendingNs.fill(0L)
         } else {
+            val ns = System.nanoTime()
+            if (pendingInputNs != 0L) {
+                stats.inputToDispatch.add((ns - pendingInputNs) / 1000)
+                flightInputNs = pendingInputNs
+                pendingInputNs = 0L
+            }
+            for (s in g.segments) {
+                if (!s.continues && s.pointer < downPendingNs.size && downPendingNs[s.pointer] != 0L) {
+                    stats.downToDispatch.add((ns - downPendingNs[s.pointer]) / 1000)
+                    downPendingNs[s.pointer] = 0L
+                }
+            }
             stats.onDispatch(t, planner.activeCount, g.recycle)
             handler.removeCallbacks(watchdog)
             handler.postDelayed(watchdog, g.durationMs + WATCHDOG_SLACK_MS)
@@ -271,6 +403,7 @@ class TouchInjector(
         private const val LOOK_ZONE = 0.22f
         private const val SCREEN_TTL_MS = 500L
         private const val WATCHDOG_SLACK_MS = 1_000L
+        private const val QUEUE_CAP = 256
         const val MIN_DEADMAN_MS = 200L
         const val MAX_DEADMAN_MS = 5_000L
 

@@ -15,7 +15,7 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         if (::injector.isInitialized) injector.shutdown() // reconexão do serviço: não deixa a thread antiga viva
-        injector = TouchInjector(this) { screenSize() }
+        injector = TouchInjector(this, { screenSize() }, { refreshRate() })
         instance = this
     }
 
@@ -46,6 +46,12 @@ class GameAccessibilityService : AccessibilityService() {
         val d = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY) ?: return 0 to 0
         d.getRealMetrics(m)
         return m.widthPixels to m.heightPixels
+    }
+
+    /** Taxa de atualização atual (o mesmo valor que o AccessibilityService usa para os passos dos gestures). */
+    private fun refreshRate(): Float {
+        val dm = getSystemService(DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        return dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.refreshRate ?: 60f
     }
 
     // Utilitários de gesto único (toque curto / arrasto), conforme a especificação.

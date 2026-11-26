@@ -38,6 +38,11 @@ Site: https://mirror-control.vercel.app
    colisão e a linha **Diagnóstico de toque** no app. Modelo do injetor do AOSP nos testes JVM (`AospTouchModel.kt`). No WebRTC, DOWN/UP levam uma geração, são repetidos e há keepalive + "deadman" no celular
    (soltar perdido nunca prende o dedo). Detalhes em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md#entrada-pacote-de-18-bytes--v2-site-e-app-031).
    Guia de uso em [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#usando-o-site-app-e-site-030).
+6. **Fluidez de multiações e latência tecla→toque (site e app 0.3.3)**: segmentos de toque curtos (a próxima tecla quase
+   nunca espera o gesture anterior), perfis **Equilibrado / Máxima fluidez / Economia** escolhidos na barra do site,
+   USB sem pacotes redundantes e com escrita agrupada, ping/pong do enlace na barra e latências medidas no celular no
+   **Diagnóstico de toque**. Medições (modelo do AOSP e navegador) em
+   [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#fluidez-e-latência-033-perfis-e-como-comparar-no-aparelho).
 
 ## Web (testado: `tsc` e `next build` passam)
 ```bash
@@ -61,4 +66,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão do app no código: 0.3.2 (versionCode 11). O APK publicado em `apk/` (ver `apk/version.json`) é trocado na publicação.
+Versão do app no código: 0.3.3 (versionCode 12). O APK publicado em `apk/` (ver `apk/version.json`) é trocado na publicação.

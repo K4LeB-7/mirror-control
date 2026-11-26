@@ -140,16 +140,68 @@ com o painel aberto. A linha de baixo da barra mostra uma dica do modo atual ou 
 - Tudo isso foi verificado num **modelo** do Android (código do AOSP transcrito nos testes), não no aparelho: confira
   com o diagnóstico abaixo.
 
-### Diagnóstico de toque (app 0.3.2)
+### Diagnóstico de toque (app 0.3.2; latências e perfil no 0.3.3)
 No app, marque **Diagnóstico de toque** (embaixo de **Parar**). Marcar zera os contadores; jogue um pouco, volte ao app
 e anote a linha (dá para selecionar e copiar):
-- **gestures**: total, média/s, pico/s e último segundo. Com uma tecla segurada, ~60/s é o esperado.
+- **perfil** (0.3.3): perfil de fluidez ativo (o escolhido na barra do site) e o quadro do display usado (8 ms = 120 Hz).
+  Trocar o perfil pelo site zera as latências (elas valem só para o perfil mostrado).
+- **gestures**: total, média/s, pico/s e último segundo. Com uma tecla segurada: ~60–75/s no Equilibrado, ~120/s na
+  Máxima fluidez a 120 Hz, ~20–50/s na Economia.
 - **cancelados (recusados)**: gestos cancelados pelo Android (recusados = cancelados em menos de 5 ms). Esperado: 0,
   ou só quando você encosta o dedo de verdade na tela. Números altos = mande para o desenvolvedor.
 - **maior lacuna com dedo segurado**: maior intervalo entre dois gestos enquanto havia dedo pressionado (esperado:
-  < 50 ms; centenas de ms = o jogo ficou sem eventos).
+  < 25 ms no Equilibrado/Máxima fluidez, < 60 ms na Economia; centenas de ms = o jogo ficou sem eventos).
 - **dedos**: ativos agora e pico. **reciclagens de ids**: quantas vezes todos os dedos foram re-encostados para não
   repetir ids.
+- **latência p50/p95/máx** (0.3.3, medida NO CELULAR, das últimas 512 amostras):
+  - **DOWN→dispatch**: de o pacote de uma tecla apertada chegar ao app até o `dispatchGesture` que encosta o dedo — a
+    espera do planejador (gesture anterior em voo). Esperado no Equilibrado: p50 ≲ 3 ms, p95 ≲ 10 ms.
+  - **pacote→dispatch**: o mesmo para qualquer pacote que muda algo (DOWN, MOVE, UP, câmera). Um UP que chega antes do
+    toque mínimo (clique muito curto) espera o mínimo de propósito e aparece aqui.
+  - **pacote→fim do gesture**: até o Android avisar que o gesture terminou (`onCompleted`): limite superior da entrega ao
+    jogo (o DOWN/MOVE é entregue antes).
+
+### Fluidez e latência (0.3.3): perfis e como comparar no aparelho
+Na barra do site (grupo **Fluidez**) escolha **Equilibrado** (padrão), **Máxima fluidez** ou **Economia**. A escolha
+fica salva no navegador, vai ao celular a cada conexão e pode ser trocada no meio do jogo (não solta dedos). Ao lado
+aparece "✔ no celular · quadro N ms" quando o app 0.3.3 confirma; "app sem perfis" = app antigo (o seletor não tem
+efeito). Na linha de baixo, **Enlace**: RTT do ping (mediana/p95/máx dos últimos 20, 1 por segundo), "tecla→celular ≈"
+(RTT/2 + tempo do app) e "celular→toque" (a espera no celular até o `dispatchGesture`, mediana). "—" = app antigo.
+- **Equilibrado**: dedo parado renovado a cada ~16 ms (como a 0.3.2), mas com segmentos curtos — a próxima tecla quase
+  nunca espera. Melhor custo/benefício.
+- **Máxima fluidez**: renova a cada quadro do display (8 ms a 120 Hz) e usa os menores segmentos; ~2× gestos/s do
+  Equilibrado a 120 Hz (mais CPU/bateria). Toque mínimo de 40 ms (ainda > 1 quadro de um jogo a 30 fps).
+- **Economia**: dedo parado renovado a cada 50 ms (o jogo pode ficar até ~50 ms sem MOVE de um dedo PARADO); toques e
+  movimentos continuam imediatos. Menos gestos/s que a 0.3.2.
+
+**Como comparar no Poco** (mesmo jogo, mesma situação, ~2 min cada): 1) escolha o perfil no site; 2) no app desmarque
+e marque **Diagnóstico de toque** (zera); 3) jogue andando + pulando + atirando + mirando; 4) volte ao app e copie a
+linha; 5) repita nos outros perfis. Compare DOWN→dispatch (p50/p95), maior lacuna, gestures/s e a bateria/temperatura
+(Configurações → Bateria) se jogar por mais tempo. Mande também a linha **Enlace** do site (RTT/tecla→celular).
+
+**Medições no modelo do Android** (AOSP 14/15 transcrito nos testes JVM; carga de 20 s: WASD mudando de direção a cada
+100–300 ms, rajadas de 2–6 botões, câmera a 60 Hz; tempos do pacote chegar ao app até o MotionEvent entregue ao jogo,
+p50/p95/máx em ms; ipc = 1 ms por chamada ao sistema; é MODELO, não o aparelho):
+
+| 120 Hz | DOWN (tecla nova) | 2ª tecla "junta" | UP (além do mínimo) | MOVE joystick | câmera | maior lacuna | joystick fora | gestures/s |
+|---|---|---|---|---|---|---|---|---|
+| 0.3.2 | 10/24/28 | 15/25/26 | 14/25/39 | 22/33/34 | 5/10/19 | 31 | 2,7% | 54 |
+| Equilibrado | 2/7/14 | 6/7/11 | 3/7/8 | 5/10/15 | 3/6/22 | 18 | 1,6% | 75 |
+| Máxima fluidez | 2/6/12 | 4/6/11 | 2/4/5 | 3/10/13 | 2/4/20 | 9 | 1,4% | 127 |
+| Economia | 3/12/18 | 8/13/13 | 5/13/14 | 9/16/19 | 5/9/26 | 54 | 1,5% | 49 |
+
+**Medições no navegador** (Chromium, carga de multiação de 6 s: WASD, rajadas de teclas/botões do mouse, mouse a
+250 Hz; do evento de teclado/mouse até o pacote chegar ao "celular" falso; "ADB" = biblioteca Tango de verdade sobre
+um USB simulado SEM "delayed ack" e 1 ms por transferência — pessimista; o aparelho real pode ser mais rápido):
+
+| transporte, app | evento→celular p50/p95/máx (ms) ANTES → DEPOIS | pacotes/s ANTES → DEPOIS | writes/s ANTES → DEPOIS |
+|---|---|---|---|
+| USB falso, app 0.3.1+ (caps) | 0,1/0,2/1,0 → 0,1/0,2/0,9 | 120 → 72 | 120 → 68 |
+| ADB, app 0.3.1+ (caps) | 80/187/251 → 8,5/17/21 | 92 → 75 | 92 → 68 |
+| ADB, app 0.3.0 (sem caps) | 12,6/46/68 → 8,5/17/21 | 78 → 79 | 78 → 71 |
+
+Tabelas completas (60/90/120 Hz, ipc 1 e 3 ms, contribuição de cada mudança): `gradle testDebugUnitTest` grava
+`android/app/build/multiaction-before-after.txt` e `multiaction-ablation.txt`.
 
 ### Ver os toques ao vivo ("Local do ponteiro")
 *Opções do desenvolvedor* (Xiaomi/HyperOS: *Configurações adicionais → Opções do desenvolvedor*) → seção **Entrada** →

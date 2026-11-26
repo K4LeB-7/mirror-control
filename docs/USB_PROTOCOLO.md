@@ -47,13 +47,21 @@ Um `len` fora do limite é erro de protocolo: o receptor fecha a conexão (não 
      sempre: CTRL `status` (abaixo);
    - `{"type":"nav","action":"back"|"home"|"recents"}` (app 0.3.0+) → `performGlobalAction` do serviço de
      acessibilidade. Resposta só em caso de falha (ex.: acessibilidade desligada).
-   - `{"type":"input","deadmanMs":500}` (site/app 0.3.1+, só depois do `caps` abaixo) → liga o "deadman" da entrada v2.
+   - `{"type":"input","deadmanMs":N,"profile":"balanced"|"smooth"|"eco"}` (site/app 0.3.1+, só depois do `caps`
+     abaixo): `deadmanMs` > 0 liga o "deadman" da entrada v2 (WebRTC: 500), 0 desliga (USB, site 0.3.3+). `profile`
+     (site/app 0.3.3+) = perfil de fluidez (ver "Perfis de fluidez" abaixo); o site sempre manda os dois campos
+     juntos e o app 0.3.3 aplica só os presentes. App 0.3.1/0.3.2 lê só `deadmanMs` (ignora `profile`).
+   - `{"type":"ping","t":T}` (site 0.3.3+, ~1/s enquanto conectado) → o app 0.3.3+ responde NA HORA
+     `{"type":"pong","t":T,"p":µs,"d":ms,"profile":"…"}` (ver "Ping/pong"). App antigo ignora (o site mostra "—").
 
    **CTRL celular → navegador** (app 0.3.0+): `{"type":"status","scope":"rotate"|"nav","ok":true|false,"text":"…"}`,
    texto em português para mostrar na barra do site. Os mesmos JSON `rotate`/`nav`/`status` passam pelo DataChannel
    `ctrl` no modo WebRTC. Um app antigo (≤ 0.2.0) ignora `rotate`/`nav` sem responder.
    **CTRL `{"type":"caps","input":2}`** (app 0.3.1+): enviado logo depois do PIN aceito (antes do INFO) e, no WebRTC,
-   quando o canal `ctrl` abre. Anuncia a entrada v2 (próxima seção). Site antigo ignora.
+   quando o canal `ctrl` abre. Anuncia a entrada v2 (próxima seção). Site antigo ignora. App 0.3.3+:
+   `{"type":"caps","input":2,"profile":1,"ping":1}` (entende perfis de fluidez e ping).
+   **CTRL `{"type":"status","scope":"profile","ok":true,"profile":"smooth","frameMs":8,"text":"…"}`** (app 0.3.3+):
+   resposta ao `input.profile` com o perfil aplicado e o quadro do display usado (ms); o site mostra na barra.
 5. Ao desconectar: celular solta todos os dedos (`releaseAll`) e para o encoder (a VirtualDisplay fica sem surface,
    pronta para a próxima conexão).
 
@@ -103,6 +111,66 @@ App 0.3.2 (regras do `MotionEventInjector` do AOSP 14/15, modeladas em `AospTouc
 - **Ids de ponteiro do sistema**: o Android só libera um id quando todos os dedos injetados levantam e, gastos 0..9, dá
   10 a todo dedo novo. O planejador prevê os ids e, antes de dois dedos colidirem, levanta e re-encosta todos
   ("reciclagem", ~10 ms).
+
+### Entrada no site e no app 0.3.3 (fluidez de multiações e latência tecla → toque)
+O pacote de 18 bytes e as regras de geração NÃO mudam. Medições ANTES × DEPOIS em `docs/INSTALAR_APK.md`
+("Fluidez e latência (0.3.3)").
+
+- **USB sem redundância** (site 0.3.3): o canal USB/ADB é TCP (ordenado, sem perda), então com `caps` o site NÃO repete
+  DOWN/UP nem manda keepalive, e pede `deadmanMs: 0` (desligado). Um pacote por evento. Proteção contra dedo preso: ao
+  cair o socket (cabo solto, aba fechada, PC dormindo) o app faz `releaseAll` (`UsbStreamServer.Session.close/finish`);
+  aba escondida/sem foco/menu do navegador → o site manda UP + RELEASE_ALL. No **WebRTC** (canal `input` sem
+  retransmissão) tudo continua como na 0.3.1 (cópias em 20/60 ms, keepalive 100 ms, deadman 500 ms).
+  Compatibilidade: app 0.3.0 (sem caps) = comportamento antigo; app 0.3.1/0.3.2 = recebe `deadmanMs: 0` no USB
+  (deadman desligado, como numa conexão sem keepalive) e ignora `profile`.
+- **Escrita agrupada no USB** (site 0.3.3, `usbSession.ts`): um write por vez no canal ADB; com o canal livre o 1º
+  quadro sai numa microtarefa (tudo o que o MESMO evento gerou — ex.: DOWN + MOVE do joystick — vai num write só, sem
+  timer nem quadro de tela); o que chega durante um write em andamento sai TODO junto no próximo, assim que ele termina.
+  Ordem estrita (uma fila só, entre todos os ponteiros: um DOWN nunca ultrapassa um MOVE enviado antes). MOVE/LOOK
+  continuam agrupados por quadro (rAF) no controlador e podem ser descartados se a fila passar de 32 quadros; DOWN/UP
+  nunca. Motivo: cada write do Tango = um pacote ADB WRTE (2 transferências USB) e, em adbd sem "delayed ack", uma
+  espera do OKAY antes do próximo — com a cadeia de 0.3.2 os pacotes faziam fila atrás dessas esperas.
+- **Ping/pong** (site e app 0.3.3): o site manda `{"type":"ping","t":performance.now()}` a cada 1 s pelo canal de
+  controle (USB: CTRL no mesmo socket; WebRTC: canal `ctrl`); o app responde na thread que leu a mensagem
+  `{"type":"pong","t":<o mesmo>,"p":<µs entre receber o ping e mandar o pong>,"d":<mediana DOWN→dispatchGesture medida
+  no celular, ms, -1 = sem dados>,"profile":"…"}`. O site mostra na barra: RTT (mediana/p95/máx dos últimos 20),
+  "tecla→celular ≈ RTT/2 + p" e "celular→toque" (= d). Observação: no USB o pong volta pela fila de saída do celular,
+  atrás de quadros de vídeo já enfileirados, então o RTT/2 tende a SUPERestimar a ida da entrada.
+- **Perfis de fluidez** (app 0.3.3, `FluidityProfile.kt`; escolhidos na barra do site, salvos no navegador e enviados a
+  cada conexão; trocáveis a qualquer momento, sem soltar dedos). Q = 1 quadro do display (1000/Hz, inteiro: 8 ms em
+  120 Hz, 11 em 90, 16 em 60; relido a cada 0,5 s porque o HyperOS alterna a taxa):
+
+  | perfil | renovação do dedo parado | 1º arrasto (joystick) | movimento | 1º segmento de botão | final | toque mínimo |
+  |---|---|---|---|---|---|---|
+  | Equilibrado (padrão) | máx(16 ms, Q) | Q | 4 ms | 2 ms | 2 ms | 50 ms |
+  | Máxima fluidez | Q | Q | 2 ms | 1 ms | 1 ms | 40 ms |
+  | Economia | 50 ms | Q | 8 ms | 4 ms | 4 ms | 50 ms |
+
+**Toques no Android, app 0.3.3** (`TouchPlanner` + `TouchInjector`; o que mudou em relação à 0.3.2):
+- **Segmentos curtos**: o planejador só pode despachar um gesture novo quando o anterior termina (um em voo por vez).
+  Na 0.3.2 todo segmento durava 16 ms, então uma tecla nova esperava até ~18 ms e um MOVE chegava interpolado ao longo
+  de 16 ms. Agora o movimento de um dedo já no chão vai direto ao destino num segmento de 2–8 ms, a renovação de um dedo
+  parado dura 1–4 ms (o gesture fica em voo pouco tempo; na maior parte do tempo nada está em voo e a próxima tecla sai
+  na hora) e o UP final sai 1–4 ms depois do despacho (era 8). O 1º arrasto de um toque novo que se move (joystick)
+  dura 1 quadro: o 1º MOVE depois do DOWN chega no mesmo instante que na 0.3.2 (joystick "flutuante" continua lendo o
+  DOWN no centro antes do movimento), mas já no destino.
+- **Toque mínimo sem gesture em voo**: um clique curto (DOWN+UP antes do mínimo) faz o DOWN num segmento curto e o UP
+  perto do fim do mínimo; no meio nada fica em voo por causa dele (na 0.3.2 o toque inteiro era um segmento de 50 ms e
+  outra tecla apertada nesse intervalo esperava até 50 ms).
+- **Fila de entrada com "drain"**: pacotes que chegam juntos (mesmo read do socket) são todos aplicados antes de
+  planejar (A + Espaço no mesmo quadro = um gesture com os dois strokes). Anel sem alocação por pacote.
+- **Índice de POINTER_DOWN do AOSP**: o Android usa a posição do stroke no PASSO como índice da ação; um stroke que
+  termina no mesmo instante em que outro começa deixaria o índice errado (evento descartado). Com segmentos curtos isso
+  passou a ser possível; o planejador estende o que terminaria nesse instante em 1 ms (teste no modelo do AOSP).
+- **Reciclagem de ids**: um toque re-encostado cujo UP chegou antes de voltar ao chão e que já durou um quadro de 30 fps
+  não é re-pressionado (a 0.3.2 o re-pressionava por mais 50 ms: um "toque duplo" e um UP atrasado); o toque mínimo de
+  um toque re-encostado conta do 1º DOWN.
+- **Avaliado e NÃO adotado**: (1) "pipelining" (despachar o próximo gesture antes do fim do anterior): o
+  `MotionEventInjector` do AOSP aceita uma CONTINUAÇÃO enfileirada atrás da anterior, mas um gesture que não continua
+  (todos os dedos levantaram) cancela o anterior com CANCEL, e o app não sabe com precisão quando o sistema termina o
+  gesture em voo; no modelo, 2–4 ms de antecedência já geraram 15–19 CANCELs em 20 s e 1 ms ganhou só ~2 ms no p95.
+  (2) Reciclagem antecipada de ids (re-encostar quando só a câmera está no chão): nenhuma piscada a menos na carga
+  medida. (3) Janela de espera para juntar teclas: o "drain" já junta o que chega junto; esperar custaria em todo DOWN.
 
 ## Vídeo
 - H.264 (Baseline, ou o perfil padrão do encoder se o Baseline falhar), CBR, I-frame a cada 1 s,

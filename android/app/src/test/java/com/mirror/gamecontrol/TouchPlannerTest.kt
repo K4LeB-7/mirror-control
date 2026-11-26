@@ -188,8 +188,9 @@ class TouchPlannerTest {
         }
     }
 
+    /** 0.3.2 (Config() = valores da 0.3.2): DOWN e UP antes do 1º despacho viram um stroke só de minTapMs. */
     @Test fun downAndUpBeforeFirstDispatchBecomeOneStroke() {
-        val p = TouchPlanner()
+        val p = TouchPlanner(cfg = TouchPlanner.Config())
         p.setBounds(1000, 1000)
         p.down(3, 10f, 10f, 0)
         p.up(3, 0)
@@ -317,12 +318,36 @@ class TouchPlannerTest {
         s.assertClean()
     }
 
+    /**
+     * 0.3.3: DOWN e UP antes do 1º despacho = DOWN num segmento curto e o final só perto do fim do mínimo, SEM gesture
+     * em voo no meio (uma 2ª tecla não espera os 50 ms do 1º toque).
+     */
+    @Test fun downAndUpBeforeFirstDispatchDoNotBlockOtherKeys() {
+        val s = Sim()
+        s.p.down(3, 10f, 10f, 0)
+        s.p.up(3, 0)
+        s.pump()
+        val first = s.android.dispatched
+        assertTrue(s.p.inFlight)
+        s.advance(5)
+        assertFalse("nada em voo enquanto o toque espera o mínimo", s.p.inFlight)
+        s.down(5, 500f, 500f) // outra tecla: sai na hora
+        assertEquals(first + 1, s.android.dispatched)
+        s.drain()
+        assertEquals("3 terminou; 5 continua segurado", listOf(3), s.android.taps.map { it.first })
+        assertTrue("toque de ${s.android.taps[0].second} ms >= mínimo", s.android.taps[0].second >= s.p.cfg.minTapMs)
+        s.up(5); s.drain(); s.assertClean()
+    }
+
     @Test fun cancelDuringFinalSegmentEndsTheTouch() {
         val s = Sim()
         s.down(4)
         s.advance(20)
-        s.up(4) // final em voo
-        assertTrue(s.p.inFlight)
+        s.up(4)
+        // 0.3.3: o final sai perto do fim do toque mínimo (antes disso nada fica em voo por causa deste toque)
+        var waited = 0
+        while (!s.p.inFlight && waited < 100) { s.advance(1); waited++ }
+        assertTrue("final em voo", s.p.inFlight)
         s.cancelNext = true
         s.drain()
         assertFalse(s.p.isActive(4))

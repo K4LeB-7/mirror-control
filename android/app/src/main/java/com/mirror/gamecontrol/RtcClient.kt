@@ -444,12 +444,21 @@ class RtcClient(
     private inner class CtrlObserver(private val ch: DataChannel) : DataChannel.Observer {
         override fun onMessage(buffer: DataChannel.Buffer) {
             if (buffer.binary) return
+            val receivedNs = System.nanoTime()
             val bytes = ByteArray(buffer.data.remaining()).also { buffer.data.get(it) }
             try {
                 val msg = JSONObject(String(bytes, Charsets.UTF_8))
-                if (msg.optString("type") == "input") {
-                    // Site 0.3.1+: manda keepalive dos dedos segurados → liga o "deadman" (UP perdido não prende dedo).
-                    GameAccessibilityService.instance?.injector?.setDeadman(msg.optLong("deadmanMs", 0))
+                // input (site 0.3.1+: deadman; 0.3.3: perfil de fluidez) e ping (0.3.3): respondidos neste canal.
+                val handled = InputCtrl.handle(msg, receivedNs) { reply ->
+                    // pode vir da thread do injetor depois de o canal ser descartado (closePc): nunca lança
+                    try {
+                        if (!disposed && ch.state() == DataChannel.State.OPEN) {
+                            ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(reply.toByteArray(Charsets.UTF_8)), false))
+                        }
+                    } catch (_: Exception) {}
+                }
+                if (handled) {
+                    // tratado acima
                 } else if (msg.optString("type") == "quality") {
                     val h = msg.optInt("height", qualityHeight)
                     val f = msg.optInt("fps", qualityFps)
@@ -472,7 +481,7 @@ class RtcClient(
             // Anuncia ao site o que este app entende (o site antigo ignora tipos desconhecidos).
             if (ch.state() == DataChannel.State.OPEN && !disposed) {
                 try {
-                    ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(InputProtocol.CAPS_JSON.toByteArray(Charsets.UTF_8)), false))
+                    ch.send(DataChannel.Buffer(java.nio.ByteBuffer.wrap(InputCtrl.CAPS_JSON.toByteArray(Charsets.UTF_8)), false))
                 } catch (_: Exception) {}
             }
         }

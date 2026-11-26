@@ -1,7 +1,10 @@
 "use client";
 import { keyLabel } from "@/lib/layout";
 import type { MouseMode } from "@/lib/mouseModes";
-import type { NavAction, RotateMode } from "@/lib/protocol";
+import { FLUIDITY_PROFILES } from "@/lib/protocol";
+import type { FluidityProfile, NavAction, RotateMode } from "@/lib/protocol";
+import { linkText } from "@/lib/linkProbe";
+import type { LinkSummary } from "@/lib/linkProbe";
 
 type Props = {
   /** Texto curto da conexão, ex.: "USB conectado". */
@@ -27,6 +30,16 @@ type Props = {
   onShowControls: (v: boolean) => void;
   quality: { height: number; fps: number };
   onQuality: (height: number, fps: number) => void;
+  /** Perfil de fluidez escolhido (salvo no navegador). */
+  fluidity: FluidityProfile;
+  onFluidity: (p: FluidityProfile) => void;
+  /**
+   * O que o celular respondeu: perfil aplicado (app 0.3.3+), "pending" (pedido, sem resposta ainda), "old" (app sem
+   * perfis) ou null (sem conexão).
+   */
+  phoneFluidity: { profile: FluidityProfile; frameMs: number } | "pending" | "old" | null;
+  /** Medição do enlace (ping/pong); null = sem conexão ou app antigo. */
+  link: LinkSummary | null;
   /** Botão de saída: "Sair do USB" / "Sair da pré-visualização". */
   exit?: { label: string; onClick: () => void };
 };
@@ -130,6 +143,37 @@ export default function Toolbar(p: Props) {
         </label>
       </Group>
 
+      <Group label="Fluidez">
+        <select
+          aria-label="Fluidez"
+          data-testid="fluidity-select"
+          className="rounded-md border border-zinc-700 bg-zinc-800 p-1"
+          value={p.fluidity}
+          title={FLUIDITY_PROFILES.find((f) => f.id === p.fluidity)?.hint}
+          onChange={(e) => p.onFluidity(e.target.value as FluidityProfile)}
+        >
+          {FLUIDITY_PROFILES.map((f) => (
+            <option key={f.id} value={f.id} title={f.hint}>
+              {f.label}
+            </option>
+          ))}
+        </select>
+        {p.phoneFluidity && (
+          <span
+            data-testid="fluidity-status"
+            data-state={typeof p.phoneFluidity === "string" ? p.phoneFluidity : p.phoneFluidity.profile}
+            className="whitespace-nowrap text-[11px] text-zinc-400"
+            title="Perfil que o app do celular confirmou (Diagnóstico de toque no app mostra as latências medidas lá)"
+          >
+            {p.phoneFluidity === "old"
+              ? "app sem perfis (atualize p/ 0.3.3)"
+              : p.phoneFluidity === "pending"
+                ? "aplicando…"
+                : `✔ no celular${p.phoneFluidity.frameMs ? ` · quadro ${p.phoneFluidity.frameMs} ms` : ""}`}
+          </span>
+        )}
+      </Group>
+
       <div className="flex items-center gap-2">
         <select
           aria-label="Qualidade"
@@ -157,6 +201,15 @@ export default function Toolbar(p: Props) {
 
       {/* Linha de status sempre presente (altura fixa): avisos não empurram o vídeo. */}
       <div className="flex h-5 w-full min-w-0 items-center gap-2 overflow-hidden" data-testid="status-line">
+        {p.connectionOk && p.canControl && (
+          <span
+            data-testid="link-stats"
+            className="shrink-0 whitespace-nowrap rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
+            title="Ping a cada 1 s (últimos 20). tecla→celular ≈ RTT/2 + tempo do app; celular→toque = espera medida no celular até o dispatchGesture (mediana). Sem resposta = app antigo."
+          >
+            {linkText(p.link)}
+          </span>
+        )}
         {p.warning && (
           <span data-testid={p.warning.testId} className="shrink-0 truncate rounded bg-amber-700 px-2 py-0.5 text-white">
             {p.warning.text}

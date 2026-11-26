@@ -30,7 +30,17 @@ object UsbWire {
 
     class WireException(msg: String) : IOException(msg)
 
-    class Frame(val type: Int, val payload: ByteArray)
+    /** [length] = bytes válidos de [payload] (com [Scratch], o payload de INPUT é um buffer reaproveitado). */
+    class Frame(val type: Int, val payload: ByteArray, val length: Int = payload.size)
+
+    /**
+     * Buffers reaproveitados pela thread de leitura (0.3.3): o cabeçalho e o payload de INPUT (18 bytes, o quadro
+     * mais frequente) não alocam por quadro. O Frame devolvido com INPUT só vale até a próxima leitura.
+     */
+    class Scratch {
+        internal val header = ByteArray(HEADER_SIZE)
+        internal val input = ByteArray(INPUT_SIZE)
+    }
 
     /** Valida `len` (sem sinal) para o tipo; lança [WireException] se estiver fora do limite. */
     fun checkLength(type: Int, len: Long) {
@@ -95,8 +105,8 @@ object UsbWire {
      * Lê um quadro inteiro (o TCP entrega pedaços de qualquer tamanho; aqui juntamos até completar).
      * Retorna null em EOF limpo entre quadros; lança EOFException se a conexão cair no meio de um quadro.
      */
-    fun read(input: InputStream): Frame? {
-        val h = ByteArray(HEADER_SIZE)
+    fun read(input: InputStream, scratch: Scratch? = null): Frame? {
+        val h = scratch?.header ?: ByteArray(HEADER_SIZE)
         val first = input.read()
         if (first < 0) return null
         h[0] = first.toByte()
@@ -105,7 +115,7 @@ object UsbWire {
         val len = (h[1].toLong() and 0xFF) or ((h[2].toLong() and 0xFF) shl 8) or
             ((h[3].toLong() and 0xFF) shl 16) or ((h[4].toLong() and 0xFF) shl 24)
         checkLength(type, len) // rejeita antes de alocar
-        val payload = ByteArray(len.toInt())
+        val payload = if (scratch != null && type == INPUT) scratch.input else ByteArray(len.toInt())
         readFully(input, payload, 0, payload.size)
         return Frame(type, payload)
     }
