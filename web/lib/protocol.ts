@@ -68,7 +68,22 @@ export type CtrlMessage =
    */
   | { type: "input"; deadmanMs: number; profile?: FluidityProfile }
   /** Medição do enlace (app 0.3.3+ responde "pong" na hora; app antigo ignora). `t` = performance.now() do site. */
-  | { type: "ping"; t: number };
+  | { type: "ping"; t: number }
+  /**
+   * Perfil de vídeo (app 0.3.4+; app/site antigos ignoram em silêncio): "lowlat" = Baixa latência (padrão do site novo),
+   * "legacy" = Padrão (0.3.3). O app reconfigura o encoder sem derrubar a conexão (INFO+CONFIG+KEY novos).
+   */
+  | { type: "video"; mode: VideoMode }
+  /** Teste de latência do vídeo (app 0.3.4+): o app pisca um quadrado preto/branco e responde `flashAck` por pulso. */
+  | { type: "flash" };
+
+/** Perfil de vídeo (app 0.3.4+). */
+export type VideoMode = "lowlat" | "legacy";
+export const VIDEO_MODES: readonly { id: VideoMode; label: string; hint: string }[] = [
+  { id: "lowlat", label: "Baixa latência", hint: "Padrão novo: desenho direto no decodificador, fila curta, GOP de 4 s, bitrate 75 %, latency=1 no encoder" },
+  { id: "legacy", label: "Padrão (0.3.3)", hint: "Comportamento da 0.3.3: desenho no rAF, GOP de 1 s, fila de 8 quadros, bitrate cheio" },
+];
+export const isVideoMode = (v: unknown): v is VideoMode => v === "lowlat" || v === "legacy";
 
 /** Perfis de fluidez do celular (app 0.3.3+). Ver docs/USB_PROTOCOLO.md. */
 export type FluidityProfile = "balanced" | "smooth" | "eco";
@@ -95,9 +110,55 @@ export type PhoneCaps = { type: "caps"; input: number; profile: number; ping: nu
 export type PhoneProfile = { type: "profile"; profile: FluidityProfile; frameMs: number; text: string };
 
 /** Celular → navegador (app 0.3.3+): resposta ao ping. p = µs no app; d = mediana DOWN→dispatch (ms, -1 = sem dados). */
-export type PhonePong = { type: "pong"; t: number; p: number; d: number; profile?: FluidityProfile };
+export type PhonePong = { type: "pong"; t: number; p: number; d: number; profile?: FluidityProfile; /** app 0.3.4+: relógio monotônico do celular (µs, a base do PTS do vídeo). */ pm?: number };
 
-export function parsePhoneCtrl(text: string): PhoneStatus | PhoneCaps | PhoneProfile | PhonePong | null {
+/** [p50, p95, max] em ms (a mesma definição de índices do app e do site: p50 = s[(n-1)/2], p95 = s[(n-1)*95/100]). */
+export type VstatPct = { p50: number; p95: number; max: number };
+
+/**
+ * Celular → navegador (app 0.3.4+, ~1 Hz): estatística do encoder. `enc` = captura+codificação no celular (null se o
+ * relógio do PTS não foi confirmado, ver `clk`), `q` = espera na fila de saída do app, `wr` = write+flush no socket.
+ */
+export type PhoneVstat = {
+  type: "vstat";
+  seq: number;
+  enc: VstatPct | null;
+  q: VstatPct | null;
+  wr: VstatPct | null;
+  fps: number;
+  kbps: number;
+  keyMaxKB: number;
+  queueDrops: number;
+  queueOverflows: number;
+  queuePeak: number;
+  /** Base do PTS: "mono" | "boot" | "unk" (não confirmada: `enc` nulo e a idade do quadro fica "—"). */
+  clk: string;
+  mode: VideoMode | "";
+  /** Nível de configuração que o encoder aceitou (3 = baixa latência completa). */
+  tier: number;
+  rej: string;
+  width: number;
+  height: number;
+  capFps: number;
+  targetKbps: number;
+  gop: number;
+  n: number;
+  /** Versão do app (versionName), quando informada. */
+  ver: string;
+};
+
+/** Celular → navegador (app 0.3.4+): pulso branco apresentado (`pm` µs, base do pong) ou fim do teste (`end`). */
+export type PhoneFlashAck = { type: "flashAck"; n: number; pm: number; pm0?: number; vs?: number; end: boolean; pulses?: number };
+
+const pct = (v: unknown): VstatPct | null => {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const p50 = Number(o.p50), p95 = Number(o.p95), max = Number(o.max);
+  return Number.isFinite(p50) && Number.isFinite(p95) && Number.isFinite(max) ? { p50, p95, max } : null;
+};
+const num = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+
+export function parsePhoneCtrl(text: string): PhoneStatus | PhoneCaps | PhoneProfile | PhonePong | PhoneVstat | PhoneFlashAck | null {
   try {
     const j = JSON.parse(text);
     if (j && j.type === "status" && j.scope === "profile" && isFluidityProfile(j.profile))
@@ -106,7 +167,26 @@ export function parsePhoneCtrl(text: string): PhoneStatus | PhoneCaps | PhonePro
       return { type: "status", scope: String(j.scope ?? ""), ok: j.ok !== false, text: j.text.slice(0, 300) };
     if (j && j.type === "caps") return { type: "caps", input: Number(j.input) || 0, profile: Number(j.profile) || 0, ping: Number(j.ping) || 0 };
     if (j && j.type === "pong" && Number.isFinite(Number(j.t)))
-      return { type: "pong", t: Number(j.t), p: Number(j.p) || 0, d: Number.isFinite(Number(j.d)) ? Number(j.d) : -1, profile: isFluidityProfile(j.profile) ? j.profile : undefined };
+      return {
+        type: "pong", t: Number(j.t), p: Number(j.p) || 0, d: Number.isFinite(Number(j.d)) ? Number(j.d) : -1,
+        profile: isFluidityProfile(j.profile) ? j.profile : undefined,
+        ...(j.pm !== undefined && j.pm !== null && Number.isFinite(Number(j.pm)) ? { pm: Number(j.pm) } : {}),
+      };
+    if (j && j.type === "vstat")
+      return {
+        type: "vstat", seq: num(j.seq), enc: pct(j.enc), q: pct(j.q), wr: pct(j.wr), fps: num(j.fps), kbps: num(j.kbps),
+        keyMaxKB: num(j.keyMaxKB), queueDrops: num(j.queueDrops), queueOverflows: num(j.queueOverflows),
+        queuePeak: num(j.queuePeak), clk: String(j.clk ?? "unk").slice(0, 8), mode: isVideoMode(j.mode) ? j.mode : "",
+        tier: num(j.tier, -1), rej: String(j.rej ?? "").slice(0, 80), width: num(j.vw), height: num(j.vh),
+        capFps: num(j.capFps), targetKbps: num(j.targetKbps), gop: num(j.gop), n: num(j.n),
+        ver: String(j.ver ?? "").replace(/[^0-9A-Za-z.\-]/g, "").slice(0, 16),
+      };
+    if (j && j.type === "flashAck") {
+      const end = j.end === 1 || j.end === true;
+      if (end) return { type: "flashAck", n: 0, pm: 0, end: true, pulses: num(j.pulses) };
+      if (Number.isFinite(Number(j.n)) && Number.isFinite(Number(j.pm)) && Number(j.n) >= 1)
+        return { type: "flashAck", n: Number(j.n), pm: Number(j.pm), pm0: j.pm0 === undefined ? undefined : num(j.pm0), vs: j.vs === undefined ? undefined : num(j.vs), end: false };
+    }
   } catch {}
   return null;
 }

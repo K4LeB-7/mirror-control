@@ -56,6 +56,31 @@ class UsbStreamServer(
     // Estado do encoder: só na thread usb-ctl (exceto o que está sob videoLock).
     private var shortSide = 720
     private var fps = 60
+    /** Perfil de vídeo (0.3.4). Site antigo nunca manda `video`: fica LEGACY (= 0.3.3). Escrita na thread usb-ctl. */
+    @Volatile private var videoMode = VideoMode.LEGACY
+    /** Relógio do PTS (µs): base confirmada em tempo de execução; também é o `pm` do pong e do flashAck. */
+    private val ptsClock = PtsClock({ System.nanoTime() / 1000 }, { SystemClock.elapsedRealtimeNanos() / 1000 })
+    private val videoStats = VideoStats()
+    private val appVersion: String = try {
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
+    } catch (_: Exception) { "" }
+    private var vstatSeq = 0
+    private val vstatTick = object : Runnable {
+        override fun run() {
+            val s = current
+            if (s == null || !encoder.isRunning || stopped) return
+            val snap = videoStats.snapshot(SystemClock.elapsedRealtime())
+            val p = encoder.params
+            if (p != null) {
+                val meta = VideoStats.Companion.Meta(
+                    ++vstatSeq, p.mode, encoder.tier, ptsClock.base.wire, p.width, p.height, p.fps, p.bitrate,
+                    VideoTuning.gopSeconds(p.mode), s.queue.dropped, s.queue.overflows, s.queue.takePeak(), encoder.rejected, appVersion,
+                )
+                s.send(UsbWire.CTRL, VideoStats.vstatJson(snap, meta, ptsClock.trusted).toByteArray(Charsets.UTF_8))
+            }
+            ctl.postDelayed(this, 1000)
+        }
+    }
     private var pendingStart: Runnable? = null
     private val sizeSupported by lazy { ScreenEncoder.sizeChecker() }
 
@@ -82,7 +107,11 @@ class UsbStreamServer(
         }
 
         override fun onFrame(key: Boolean, ptsUs: Long, data: java.nio.ByteBuffer) {
+            // Instante em que o quadro codificado saiu do MediaCodec: enc = agora − pts (captura + codificação).
+            val nowUs = ptsClock.nowUs()
             val s = current ?: return
+            ptsClock.observe(ptsUs)
+            videoStats.onFrame(if (ptsClock.trusted) nowUs - ptsUs else -1, data.remaining(), key)
             if (synchronized(videoLock) { infoPending }) {
                 // Encoder que só manda SPS/PPS dentro do IDR (sem csd): extrai daqui para gerar INFO + CONFIG.
                 val cfg = if (key) UsbWire.parameterSets(ByteArray(data.remaining()).also { data.duplicate().get(it) }) else null
@@ -90,7 +119,7 @@ class UsbStreamServer(
                 if (synchronized(videoLock) { infoPending }) return // sem INFO/CONFIG: o navegador não decodificaria
             }
             val type = if (key) UsbWire.VIDEO_KEY else UsbWire.VIDEO_DELTA
-            if (s.queue.offer(FrameQueue.Item(type, UsbWire.encodeVideo(type, ptsUs, data)))) {
+            if (s.queue.offer(FrameQueue.Item(type, UsbWire.encodeVideo(type, ptsUs, data), System.nanoTime()))) {
                 // Fila cheia (USB lento): deltas descartados até o próximo IDR → pede um já.
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastKeyRequest > 300) {
@@ -131,6 +160,8 @@ class UsbStreamServer(
         val done = CountDownLatch(1)
         ctl.post {
             pendingStart?.let { ctl.removeCallbacks(it) }
+            ctl.removeCallbacks(vstatTick)
+            FlashController.cancel()
             try { encoder.release() } catch (e: Exception) { Log.w(TAG, "release", e) }
             done.countDown()
         }
@@ -225,7 +256,8 @@ class UsbStreamServer(
     private fun computeParams(): ScreenEncoder.Params {
         val (sw, sh) = screenPx()
         val (w, h) = ScreenEncoder.fitSize(sw, sh, shortSide, sizeSupported)
-        return ScreenEncoder.Params(w, h, fps, ScreenEncoder.bitrateFor(minOf(w, h), fps))
+        val mode = videoMode
+        return ScreenEncoder.Params(w, h, fps, VideoTuning.bitrate(mode, minOf(w, h), fps), mode)
     }
 
     /** Espera um instante pelo CTRL quality que o navegador manda logo após o HELLO (evita dois reinícios). */
@@ -246,8 +278,12 @@ class UsbStreamServer(
             lastConfig = null
         }
         val p = computeParams()
+        videoStats.reset()
+        ptsClock.reset()
+        ctl.removeCallbacks(vstatTick)
         try {
             encoder.start(p)
+            ctl.postDelayed(vstatTick, 1000)
         } catch (e: Exception) {
             Log.e(TAG, "start", e)
             current?.close("ENCODER: não foi possível iniciar o H.264 ${p.width}×${p.height}: ${e.message}")
@@ -258,7 +294,7 @@ class UsbStreamServer(
         val msg = try { JSONObject(json) } catch (_: Exception) { return }
         // input (deadman/perfil) e ping: a resposta entra na fila de saída como qualquer CTRL (atrás de quadros de
         // vídeo já enfileirados; ver "ping/pong" em docs/USB_PROTOCOLO.md)
-        if (InputCtrl.handle(msg, receivedNs) { reply -> if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8)) }) return
+        if (InputCtrl.handle(msg, receivedNs, ptsClock) { reply -> if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8)) }) return
         when (msg.optString("type")) {
             // rotate / nav (app 0.3.0+). Girar dispara onDisplayChanged → encoder reinicia → INFO+CONFIG+KEY novos.
             "rotate", "nav" -> {
@@ -279,6 +315,20 @@ class UsbStreamServer(
                 }
             }
             "keyframe" -> encoder.requestKeyFrame()
+            // Perfil de vídeo (0.3.4): reconfigura o encoder na MESMA conexão (INFO+CONFIG+KEY novos).
+            "video" -> {
+                val m = VideoMode.fromWire(msg.optString("mode")) ?: return
+                ctl.post {
+                    if (m == videoMode) return@post
+                    videoMode = m
+                    current?.queue?.let { it.maxFrames = VideoTuning.queueFrames(m); it.maxBytes = VideoTuning.queueBytes(m) }
+                    if (pendingStart == null && encoder.isRunning) restartEncoder()
+                }
+            }
+            // Teste de latência do vídeo (0.3.4): quadrado branco/preto por overlay de acessibilidade + flashAck.
+            "flash" -> FlashController.start(ctx, ptsClock) { reply ->
+                if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8))
+            }
         }
     }
 
@@ -287,6 +337,8 @@ class UsbStreamServer(
             if (current != null) return@post // outra sessão já assumiu
             pendingStart?.let { ctl.removeCallbacks(it) }
             pendingStart = null
+            ctl.removeCallbacks(vstatTick)
+            FlashController.cancel()
             encoder.stop()
             if (!stopped) status("navegador desconectado; aguardando nova conexão")
         }
@@ -299,7 +351,7 @@ class UsbStreamServer(
     // ------------------------------------------------------------------ sessão
 
     private inner class Session(private val socket: Socket, private val input: InputStream) {
-        val queue = FrameQueue()
+        val queue = FrameQueue(VideoTuning.queueFrames(videoMode), VideoTuning.queueBytes(videoMode))
         private val closing = AtomicBoolean(false)
         private val finished = AtomicBoolean(false)
         @Volatile private var warnedNoAccessibility = false
@@ -356,8 +408,15 @@ class UsbStreamServer(
                 val out = BufferedOutputStream(socket.getOutputStream(), 256 * 1024)
                 while (!finished.get()) {
                     val item = queue.take(500) ?: continue
+                    val t0 = System.nanoTime()
+                    // Um quadro = um byte[] (cabeçalho+pts+payload montados juntos): a escrita nunca divide o quadro
+                    // do protocolo em dois write() do app; o flush só espera a fila esvaziar (TCP_NODELAY no socket).
+                    if (item.tNs != 0L) videoStats.onQueueWaitUs((t0 - item.tNs) / 1000)
                     out.write(item.bytes)
-                    if (queue.size == 0) out.flush()
+                    if (queue.size == 0) {
+                        out.flush()
+                        if (item.tNs != 0L) videoStats.onWriteUs((System.nanoTime() - t0) / 1000)
+                    }
                 }
             } catch (_: IOException) {
                 close(null)

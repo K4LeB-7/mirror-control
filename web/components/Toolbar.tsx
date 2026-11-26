@@ -1,8 +1,8 @@
 "use client";
 import { keyLabel } from "@/lib/layout";
 import type { MouseMode } from "@/lib/mouseModes";
-import { FLUIDITY_PROFILES } from "@/lib/protocol";
-import type { FluidityProfile, NavAction, RotateMode } from "@/lib/protocol";
+import { FLUIDITY_PROFILES, VIDEO_MODES } from "@/lib/protocol";
+import type { FluidityProfile, NavAction, RotateMode, VideoMode } from "@/lib/protocol";
 import { linkText } from "@/lib/linkProbe";
 import type { LinkSummary } from "@/lib/linkProbe";
 
@@ -40,6 +40,21 @@ type Props = {
   phoneFluidity: { profile: FluidityProfile; frameMs: number } | "pending" | "old" | null;
   /** Medição do enlace (ping/pong); null = sem conexão ou app antigo. */
   link: LinkSummary | null;
+  /**
+   * Latência do vídeo (modo USB, site 0.3.4): perfil, linha de métricas, teste de 1 clique e diagnóstico copiável.
+   * Ausente fora do modo USB.
+   */
+  video?: {
+    mode: VideoMode;
+    onMode: (m: VideoMode) => void;
+    /** "Vídeo: idade na tela 52/70 ms · …" (ou "Vídeo: —"). */
+    line: string;
+    flash: { state: "idle" | "running" | "done" | "error"; text: string };
+    onFlash: () => void;
+    onCopyDiag: () => void;
+    /** Resultado do último "Copiar diagnóstico" (texto curto). */
+    copyNote: string;
+  };
   /** Botão de saída: "Sair do USB" / "Sair da pré-visualização". */
   exit?: { label: string; onClick: () => void };
 };
@@ -174,6 +189,42 @@ export default function Toolbar(p: Props) {
         )}
       </Group>
 
+      {p.video && (
+        <Group label="Vídeo">
+          <select
+            aria-label="Perfil de vídeo"
+            data-testid="video-mode"
+            className="rounded-md border border-zinc-700 bg-zinc-800 p-1"
+            value={p.video.mode}
+            title={VIDEO_MODES.find((m) => m.id === p.video!.mode)?.hint}
+            onChange={(e) => p.video!.onMode(e.target.value as VideoMode)}
+          >
+            {VIDEO_MODES.map((m) => (
+              <option key={m.id} value={m.id} title={m.hint}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className={btn}
+            data-testid="flash-btn"
+            disabled={p.video.flash.state === "running"}
+            onClick={p.video.onFlash}
+            title="O app pisca um quadrado no canto da tela (exige acessibilidade ligada) e o site mede quanto tempo o pulso leva até aparecer no vídeo"
+          >
+            {p.video.flash.state === "running" ? "Medindo…" : "Medir latência do vídeo"}
+          </button>
+          <button className={btn} data-testid="copy-diag" onClick={p.video.onCopyDiag} title="Copia todas as métricas (entrada, vídeo, perfis, versões) para colar numa conversa">
+            Copiar diagnóstico
+          </button>
+          {p.video.copyNote && (
+            <span data-testid="copy-note" className="whitespace-nowrap text-[11px] text-zinc-400">
+              {p.video.copyNote}
+            </span>
+          )}
+        </Group>
+      )}
+
       <div className="flex items-center gap-2">
         <select
           aria-label="Qualidade"
@@ -208,6 +259,25 @@ export default function Toolbar(p: Props) {
             title="Ping a cada 1 s (últimos 20). tecla→celular ≈ RTT/2 + tempo do app; celular→toque = espera medida no celular até o dispatchGesture (mediana). Sem resposta = app antigo."
           >
             {linkText(p.link)}
+          </span>
+        )}
+        {p.video && (
+          <span
+            data-testid="video-stats"
+            className="min-w-0 shrink truncate rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
+            title="Idade do quadro no desenho = agora − offset de relógio − pts (captura no celular). cod. = captura+codificação no celular (mediana); cabo+dec. = cabo+fila+decodificação (mediana). Sem app 0.3.4 mostra —."
+          >
+            {p.video.line}
+          </span>
+        )}
+        {p.video && p.video.flash.text && (
+          <span
+            data-testid="flash-result"
+            data-state={p.video.flash.state}
+            title={p.video.flash.text}
+            className={`min-w-0 shrink truncate rounded px-2 py-0.5 text-[11px] ${p.video.flash.state === "error" ? "bg-rose-900 text-rose-100" : "bg-emerald-900 text-emerald-100"}`}
+          >
+            {p.video.flash.text}
           </span>
         )}
         {p.warning && (

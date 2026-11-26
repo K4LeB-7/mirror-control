@@ -36,7 +36,8 @@ class ScreenEncoder(
         fun onError(e: Exception)
     }
 
-    data class Params(val width: Int, val height: Int, val fps: Int, val bitrate: Int)
+    /** [mode]: perfil de vídeo (0.3.4). LEGACY = exatamente a configuração da 0.3.3. */
+    data class Params(val width: Int, val height: Int, val fps: Int, val bitrate: Int, val mode: VideoMode = VideoMode.LEGACY)
 
     private var display: VirtualDisplay? = null
     @Volatile private var codec: MediaCodec? = null
@@ -49,6 +50,15 @@ class ScreenEncoder(
         private set
 
     val isRunning get() = params != null
+
+    /**
+     * Nível de configuração que o encoder aceitou (3 = baixa latência completa: latency + operating-rate; 2 = tudo da
+     * 0.3.3; 1 = perfil + CBR; 0 = mínimo) e, se uma chave foi recusada, o motivo (vai no vstat `tier`/`rej`).
+     */
+    @Volatile var tier = 2
+        private set
+    @Volatile var rejected = ""
+        private set
 
     fun start(p: Params) {
         stop()
@@ -157,15 +167,19 @@ class ScreenEncoder(
 
     private fun createCodec(p: Params): MediaCodec {
         var last: Exception? = null
-        // 2 = tudo (perfil, CBR, prioridade, low-latency); 1 = perfil + CBR; 0 = o mínimo que todo encoder aceita.
-        for (tier in 2 downTo 0) {
+        rejected = ""
+        // 3 = baixa latência (latency + operating-rate; só no modo LOWLAT); 2 = tudo (perfil, CBR, prioridade,
+        // low-latency); 1 = perfil + CBR; 0 = o mínimo que todo encoder aceita.
+        for (tier in (if (p.mode == VideoMode.LOWLAT) 3 else 2) downTo 0) {
             val c = MediaCodec.createEncoderByType(MIME)
             try {
                 c.configure(format(p, tier, c.codecInfo), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                Log.i(TAG, "encoder ${c.name} ${p.width}x${p.height}@${p.fps} ${p.bitrate}bps nível=$tier")
+                Log.i(TAG, "encoder ${c.name} ${p.width}x${p.height}@${p.fps} ${p.bitrate}bps modo=${p.mode.wire} nível=$tier")
+                this.tier = tier
                 return c
             } catch (e: Exception) {
                 Log.w(TAG, "configure(nível=$tier) falhou: $e")
+                if (tier == 3) rejected = "tier3 ${e.javaClass.simpleName}: ${e.message}"
                 last = e
                 c.release()
             }
@@ -178,7 +192,7 @@ class ScreenEncoder(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, p.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, p.fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, VideoTuning.gopSeconds(p.mode))
             // Tela parada: o VirtualDisplay não gera quadros; o encoder repete o último (µs).
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 150_000L)
             if (tier == 0) return@apply // mínimo: nada opcional
@@ -199,6 +213,12 @@ class ScreenEncoder(
             setInteger(MediaFormat.KEY_PRIORITY, 0) // tempo real
             if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            if (tier < 3) return@apply
+            // Baixa latência (0.3.4). "latency" é a chave que o scrcpy usa (MediaFormat.KEY_LATENCY desde a API 30; a
+            // mesma string); chaves que o encoder não conhece costumam ser ignoradas, mas se ele recusar o configure
+            // cai para o nível 2 e o motivo vai no vstat. operating-rate = fps pedido: dica de relógio de tempo real.
+            setInteger("latency", 1)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, p.fps)
         }
 
     companion object {

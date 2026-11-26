@@ -15,6 +15,8 @@ export interface ChannelOpener {
   open(note: (msg: string) => void): Promise<ByteChannel>;
   /** Libera o aparelho (o `adb` do PC volta a poder usá-lo). */
   dispose(): void;
+  /** Dados do enlace ADB para "Copiar diagnóstico" (payload máximo, delayed ack…). Opcional. */
+  diag?(): Record<string, unknown> | null;
 }
 
 export type UsbErrorCode =

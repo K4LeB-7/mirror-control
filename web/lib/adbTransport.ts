@@ -4,7 +4,7 @@
  *
  * Só é carregado por import() dinâmico (não pesa o modo WebRTC nem roda no SSR).
  */
-import { Adb, AdbDaemonTransport } from "@yume-chan/adb";
+import { Adb, AdbDaemonTransport, AdbFeature } from "@yume-chan/adb";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import { AdbDaemonWebUsbDevice, AdbDaemonWebUsbDeviceManager } from "@yume-chan/adb-daemon-webusb";
 import { ADB_USB_FILTER, ByteChannel, ChannelOpener, MSG, UsbConnectError } from "./usbTransport";
@@ -111,6 +111,20 @@ export function createAdbOpener(device: USBDevice): ChannelOpener {
         },
       };
       return channel;
+    },
+    diag() {
+      if (!adb || !alive) return null;
+      try {
+        // Tango 2.6.4 já anuncia delayed_ack (janela inicial de 32 MiB) e payload máximo de 1 MiB; vale o que o adbd aceita.
+        return {
+          maxPayloadSize: adb.maxPayloadSize,
+          delayedAck: adb.canUseFeature(AdbFeature.DelayedAck),
+          device: adb.banner.device ?? null,
+          model: adb.banner.model ?? null,
+        };
+      } catch {
+        return null;
+      }
     },
     dispose() {
       disposed = true;

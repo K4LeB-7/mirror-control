@@ -20,10 +20,13 @@ object InputCtrl {
     /**
      * Resposta ao ping: `t` = o mesmo valor do site (relógio dele), `p` = µs entre o celular receber o ping e
      * mandar o pong, `d` = mediana DOWN→dispatchGesture medida no celular (ms; -1 sem amostras), `profile`.
+     * App 0.3.4+: `pm` = relógio monotônico do celular (µs, a base do PTS do vídeo) quando o pong é montado; o site
+     * estima o offset de relógio com ele (linkProbe.ts). Sem relógio ([pmUs] < 0) o campo é omitido.
      */
-    fun pong(t: Double, procUs: Long, downDispatchMs: Double, profile: FluidityProfile): String =
-        String.format(Locale.US, "{\"type\":\"pong\",\"t\":%.3f,\"p\":%d,\"d\":%.1f,\"profile\":\"%s\"}",
-            if (t.isFinite()) t else 0.0, procUs.coerceAtLeast(0), downDispatchMs, profile.wire)
+    fun pong(t: Double, procUs: Long, downDispatchMs: Double, profile: FluidityProfile, pmUs: Long = -1): String =
+        String.format(Locale.US, "{\"type\":\"pong\",\"t\":%.3f,\"p\":%d,\"d\":%.1f,\"profile\":\"%s\"%s}",
+            if (t.isFinite()) t else 0.0, procUs.coerceAtLeast(0), downDispatchMs, profile.wire,
+            if (pmUs >= 0) ",\"pm\":$pmUs" else "")
 
     fun profileStatus(p: FluidityProfile, frameMs: Int): String =
         "{\"type\":\"status\",\"scope\":\"profile\",\"ok\":true,\"profile\":\"${p.wire}\",\"frameMs\":$frameMs," +
@@ -36,13 +39,13 @@ object InputCtrl {
      * Trata "input" e "ping" (devolve false para os outros tipos). [receivedNs] = System.nanoTime() de quando o
      * quadro/mensagem chegou; [reply] manda texto de volta pelo mesmo caminho (pode ser chamado de outra thread).
      */
-    fun handle(msg: org.json.JSONObject, receivedNs: Long, reply: (String) -> Unit): Boolean {
+    fun handle(msg: org.json.JSONObject, receivedNs: Long, clock: PtsClock? = null, reply: (String) -> Unit): Boolean {
         val injector = GameAccessibilityService.instance?.injector
         when (msg.optString("type")) {
             "ping" -> {
                 val t = msg.optDouble("t", 0.0)
                 val d = injector?.downDispatchP50Ms() ?: -1.0
-                reply(pong(t, (System.nanoTime() - receivedNs) / 1000, d, currentProfile))
+                reply(pong(t, (System.nanoTime() - receivedNs) / 1000, d, currentProfile, clock?.nowUs() ?: -1))
                 return true
             }
             "input" -> {

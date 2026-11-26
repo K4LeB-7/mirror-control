@@ -94,7 +94,20 @@ export class FrameDecoder {
   private start = 0;
   private end = 0;
 
+  /**
+   * `zeroCopy` (site 0.3.4): quando o pedaço recebido começa num limite de quadro (nada guardado de antes), os
+   * payloads devolvidos são VISTAS do próprio pedaço (sem as duas cópias do caminho normal: append + slice); só o
+   * resto incompleto é copiado. Contrato: o chamador usa/copia cada payload antes de devolver o controle ao laço de
+   * leitura (o UsbSession decodifica na hora e copia o que guarda, ex.: VIDEO_CONFIG).
+   */
+  private zeroCopy: boolean;
+
+  constructor(zeroCopy = false) {
+    this.zeroCopy = zeroCopy;
+  }
+
   push(chunk: Uint8Array): Frame[] {
+    if (this.zeroCopy && this.end === this.start) return this.pushZeroCopy(chunk);
     this.append(chunk);
     const frames: Frame[] = [];
     for (;;) {
@@ -110,6 +123,24 @@ export class FrameDecoder {
       this.start = p0 + len;
     }
     if (this.start === this.end) this.start = this.end = 0;
+    return frames;
+  }
+
+  private pushZeroCopy(chunk: Uint8Array): Frame[] {
+    const frames: Frame[] = [];
+    let off = 0;
+    for (;;) {
+      const avail = chunk.length - off;
+      if (avail < HEADER_SIZE) break;
+      const v = new DataView(chunk.buffer, chunk.byteOffset + off, HEADER_SIZE);
+      const type = v.getUint8(0);
+      const len = v.getUint32(1, true);
+      checkLength(type, len);
+      if (avail < HEADER_SIZE + len) break;
+      frames.push({ type, payload: chunk.subarray(off + HEADER_SIZE, off + HEADER_SIZE + len) });
+      off += HEADER_SIZE + len;
+    }
+    if (off < chunk.length) this.append(chunk.subarray(off)); // o resto incompleto é copiado para o buffer interno
     return frames;
   }
 

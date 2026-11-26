@@ -15,8 +15,16 @@ import kotlin.concurrent.withLock
  *   e os seguintes até o próximo VIDEO_KEY (um delta sem a referência quebraria a decodificação). Nesse caso
  *   [offer] devolve true: quem chamou deve pedir um IDR ao encoder.
  */
-class FrameQueue(private val maxFrames: Int = 8, private val maxBytes: Int = 4 * 1024 * 1024) {
-    class Item(val type: Int, val bytes: ByteArray)
+class FrameQueue(maxFrames: Int = 8, maxBytes: Int = 4 * 1024 * 1024) {
+    /** [tNs] = System.nanoTime() da oferta (0 = não medido): a thread de escrita calcula a espera na fila (vstat `q`). */
+    class Item(val type: Int, val bytes: ByteArray, val tNs: Long = 0L)
+
+    /**
+     * Política de latência (app 0.3.4): os limites podem mudar com o perfil de vídeo ([VideoTuning]). Em baixa latência
+     * a fila é curta (4 quadros): preferimos descartar os deltas e pedir um IDR a acumular atraso.
+     */
+    @Volatile var maxFrames: Int = maxFrames
+    @Volatile var maxBytes: Int = maxBytes
 
     private val lock = ReentrantLock()
     private val notEmpty = lock.newCondition()
@@ -29,6 +37,10 @@ class FrameQueue(private val maxFrames: Int = 8, private val maxBytes: Int = 4 *
         private set
     var dropped = 0L
         private set
+    /** Vezes em que a fila CHEIA descartou deltas (o USB não acompanhou o encoder); não conta os superados por um IDR novo. */
+    var overflows = 0L
+        private set
+    private var peak = 0
 
     /** @return true se é preciso pedir um quadro-chave ao encoder. */
     fun offer(item: Item): Boolean = lock.withLock {
@@ -49,10 +61,12 @@ class FrameQueue(private val maxFrames: Int = 8, private val maxBytes: Int = 4 *
                 if (videoCount >= maxFrames || bytes + item.bytes.size > maxBytes) {
                     removeIf { it.type == UsbWire.VIDEO_DELTA }
                     dropped++
+                    overflows++
                     waitingKey = true
                     return true
                 }
                 add(item)
+                if (videoCount + 1 > peak) peak = videoCount + 1
                 false
             }
             else -> {
@@ -83,6 +97,13 @@ class FrameQueue(private val maxFrames: Int = 8, private val maxBytes: Int = 4 *
     }
 
     val size: Int get() = lock.withLock { items.size }
+
+    /** Maior número de quadros de vídeo esperando desde a última chamada (zera). */
+    fun takePeak(): Int = lock.withLock {
+        val p = maxOf(peak, items.count { it.type == UsbWire.VIDEO_KEY || it.type == UsbWire.VIDEO_DELTA })
+        peak = 0
+        p
+    }
 
     fun types(): List<Int> = lock.withLock { items.map { it.type } }
 

@@ -14,6 +14,27 @@ import type { PhonePong } from "./protocol.ts";
  */
 export const PING_INTERVAL_MS = 1000;
 export const PING_WINDOW = 20;
+/** Amostras (ping com `pm`) consideradas na estimativa do offset de relógio. */
+export const CLOCK_WINDOW = 20;
+
+/**
+ * Offset de relógio navegador ↔ celular (app 0.3.4+, pong com `pm` = relógio monotônico do celular em µs).
+ * `browserMs = phoneMs + offsetMs`. Estimativa NTP: o pong foi montado no meio do caminho, então
+ * `offset = (t_envio + t_recv)/2 + p/2 − pm` (p = tempo do app tratando o ping, ≈ 0,1 ms); usa o ping de MENOR RTT
+ * da janela (filtro de mínimo: pings que esbarraram em quadros de vídeo na fila de saída do celular, ou num
+ * engasgo do USB, têm RTT maior e assimetria maior e são ignorados).
+ * Incerteza: o erro é (atraso de ida − atraso de volta)/2, no pior caso (todo o atraso de um lado só) ≈ (RTT_mín − p)/2.
+ */
+export type ClockOffset = {
+  /** browser = celular + offsetMs. */
+  offsetMs: number;
+  /** Erro máximo possível por assimetria (ms) = (RTT mínimo − p)/2. */
+  uncertaintyMs: number;
+  /** RTT do ping escolhido (ms). */
+  rttMs: number;
+  /** Amostras na janela. */
+  n: number;
+};
 
 export type LinkSummary = {
   /** Amostras na janela (0 = app antigo/sem resposta ainda). */
@@ -34,6 +55,7 @@ export class LinkProbe {
   private apps: number[] = [];
   private lastD = -1;
   private outstanding = new Set<number>();
+  private clk: { rtt: number; off: number; p: number }[] = [];
 
   private now: () => number;
 
@@ -61,7 +83,21 @@ export class LinkProbe {
     if (this.rtts.length > PING_WINDOW) this.rtts.shift();
     if (this.apps.length > PING_WINDOW) this.apps.shift();
     this.lastD = p.d;
+    if (p.pm !== undefined && Number.isFinite(p.pm)) {
+      const pMs = Math.max(0, p.p) / 1000;
+      const off = (t + t + rtt) / 2 + pMs / 2 - p.pm / 1000; // (t_envio + t_recv)/2, t_recv = t + rtt
+      this.clk.push({ rtt, off, p: pMs });
+      if (this.clk.length > CLOCK_WINDOW) this.clk.shift();
+    }
     return true;
+  }
+
+  /** Offset de relógio pelo ping de menor RTT (null = app sem `pm` ou ainda sem pong). */
+  clockOffset(): ClockOffset | null {
+    if (!this.clk.length) return null;
+    let best = this.clk[0];
+    for (const c of this.clk) if (c.rtt < best.rtt) best = c;
+    return { offsetMs: best.off, uncertaintyMs: Math.max(0, (best.rtt - best.p) / 2), rttMs: best.rtt, n: this.clk.length };
   }
 
   /** Conexão nova: esquece tudo. */
@@ -70,6 +106,7 @@ export class LinkProbe {
     this.apps = [];
     this.lastD = -1;
     this.outstanding.clear();
+    this.clk = [];
   }
 
   summary(): LinkSummary | null {

@@ -36,8 +36,12 @@ import {
   saveStore,
   updateLayout,
 } from "@/lib/profiles";
-import { CtrlMessage, FluidityProfile, NavAction, RotateMode, isFluidityProfile, parsePhoneCtrl } from "@/lib/protocol";
+import { CtrlMessage, FluidityProfile, NavAction, RotateMode, VideoMode, isFluidityProfile, isVideoMode, parsePhoneCtrl } from "@/lib/protocol";
 import { LinkProbe, LinkSummary, PING_INTERVAL_MS } from "@/lib/linkProbe";
+import { buildDiagnostics, diagnosticsText } from "@/lib/diagnostics";
+import { flashText } from "@/lib/flashProbe";
+import { DEFAULT_DEC, parseDecOptions, videoLineText } from "@/lib/videoStats";
+import { SITE_VERSION } from "@/lib/version";
 import { RemoteSession, SessionState } from "@/lib/session";
 import type { UsbSession, UsbSessionState } from "@/lib/usbSession";
 import { ChannelOpener, UsbConnectError, requestUsbDevice } from "@/lib/usbTransport";
@@ -45,6 +49,7 @@ import { ChannelOpener, UsbConnectError, requestUsbDevice } from "@/lib/usbTrans
 const ROOM_KEY = "mirror-control.room";
 /** Perfil de fluidez escolhido na barra (balanced|smooth|eco). */
 const FLUIDITY_KEY = "mirror-control.fluidity";
+const VIDEO_MODE_KEY = "mirror-control.videoMode";
 /** Margem entre o vídeo e as bordas do palco (px). */
 const STAGE_PAD = 8;
 
@@ -101,6 +106,12 @@ export default function Page() {
   const [phoneLevel, setPhoneLevel] = useState(0);
   const [link, setLink] = useState<LinkSummary | null>(null);
   const probe = useRef(new LinkProbe());
+  /** Perfil de vídeo (USB, site 0.3.4): padrão novo = Baixa latência; escolhido e salvo no navegador. */
+  const [videoMode, setVideoMode] = useState<VideoMode>("lowlat");
+  const [videoLine, setVideoLine] = useState("Vídeo: —");
+  const [flash, setFlash] = useState<{ state: "idle" | "running" | "done" | "error"; text: string }>({ state: "idle", text: "" });
+  const [copyNote, setCopyNote] = useState("");
+  const usbOpenerRef = useRef<ChannelOpener | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -145,6 +156,8 @@ export default function Page() {
     try {
       const f = localStorage.getItem(FLUIDITY_KEY);
       if (isFluidityProfile(f)) setFluidity(f);
+      const vm = localStorage.getItem(VIDEO_MODE_KEY);
+      if (isVideoMode(vm)) setVideoMode(vm);
     } catch {}
   }, []);
 
@@ -168,7 +181,9 @@ export default function Page() {
         inputRef.current?.setPhoneCaps(s.input);
       } else if (s.type === "profile") setPhoneFluidity({ profile: s.profile, frameMs: s.frameMs });
       else if (s.type === "pong") probe.current.onPong(s);
-      else notify(s.text, s.ok);
+      else if (s.type === "vstat" || s.type === "flashAck") {
+        // consumidos pela UsbSession (métricas do vídeo / teste de latência); nada a mostrar aqui
+      } else notify(s.text, s.ok);
     },
     [notify]
   );
@@ -179,7 +194,14 @@ export default function Page() {
     setPhoneFluidity(null);
     probe.current.reset();
     setLink(null);
+    setVideoLine("Vídeo: —");
     inputRef.current?.setPhoneCaps(0);
+  }, []);
+  const changeVideoMode = useCallback((m: VideoMode) => {
+    setVideoMode(m);
+    try {
+      localStorage.setItem(VIDEO_MODE_KEY, m);
+    } catch {}
   }, []);
   const fluidityRef = useRef(fluidity);
   fluidityRef.current = fluidity;
@@ -453,8 +475,24 @@ export default function Page() {
       sinkRef.current?.sendCtrl(probe.current.ping());
       const s = probe.current.summary();
       setLink((old) => (old === s || (old && s && old.n === s.n && old.rttP50 === s.rttP50 && old.rttMax === s.rttMax) ? old : s));
+      // Métricas do vídeo (USB) ~1 Hz: só texto novo muda o estado (sem render à toa).
+      if (usbRef.current) {
+        const line = videoLineText(usbRef.current.videoSummary());
+        setVideoLine((old) => (old === line ? old : line));
+      }
     }, PING_INTERVAL_MS);
-    return () => clearInterval(t);
+    // App 0.3.4 (pong com relógio): enquanto o offset tem poucas amostras, pings extras logo depois do ping normal (o offset
+    // usa o de menor RTT e o teste de latência o exige cedo). App antigo nunca responde com `pm`: nunca recebe extras.
+    const extra: ReturnType<typeof setTimeout>[] = [];
+    const tick = setInterval(() => {
+      const c = probe.current.clockOffset();
+      if (c && c.n < 6) for (const ms of [200, 400]) extra.push(setTimeout(() => sinkRef.current?.sendCtrl(probe.current.ping()), ms));
+    }, PING_INTERVAL_MS);
+    return () => {
+      clearInterval(t);
+      clearInterval(tick);
+      extra.forEach(clearTimeout);
+    };
   }, [linkUp]);
 
   // Proporção do canvas = a do vídeo que o celular anunciou (INFO; muda ao girar).
@@ -467,6 +505,13 @@ export default function Page() {
   useEffect(() => {
     usbSession?.sendCtrl({ type: "quality", ...quality });
   }, [usbSession, quality]);
+
+  // Perfil de vídeo: a sessão aplica o lado do navegador na hora e guarda/reenvia o CTRL a cada (re)conexão (app antigo ignora).
+  const usbRef = useRef<UsbSession | null>(null);
+  usbRef.current = usbSession;
+  useEffect(() => {
+    usbSession?.sendCtrl({ type: "video", mode: videoMode });
+  }, [usbSession, videoMode]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -694,7 +739,12 @@ export default function Page() {
         opener = createAdbOpener(device);
       }
       const { UsbSession } = await import("@/lib/usbSession");
-      const s = new UsbSession(opener, usbPin, { onState: setUsbState, onCtrl: onPhoneCtrl, onConnect: onPhoneConnect });
+      const s = new UsbSession(opener, usbPin, { onState: setUsbState, onCtrl: onPhoneCtrl, onConnect: onPhoneConnect }, { dec: parseDecOptions(window.location.search) });
+      s.setClock(() => probe.current.clockOffset());
+      // Só nos testes e2e (o transporte falso injetado): expõe a sessão para conferir contadores/métricas.
+      if (fake) (window as unknown as { __mirrorUsbSession?: UsbSession }).__mirrorUsbSession = s;
+      usbOpenerRef.current = opener;
+      setFlash({ state: "idle", text: "" });
       if (document.pointerLockElement) document.exitPointerLock();
       setStream(null);
       setPreview(false);
@@ -707,6 +757,56 @@ export default function Page() {
     } finally {
       setUsbBusy(false);
     }
+  };
+
+  const runFlash = async () => {
+    const s = usbRef.current;
+    if (!s || flash.state === "running") return;
+    setFlash({ state: "running", text: "Medindo: o app vai piscar um quadrado no canto da tela do celular…" });
+    const r = await s.startFlashTest();
+    setFlash({ state: r.ok ? "done" : "error", text: flashText(r) });
+  };
+
+  const copyDiag = async () => {
+    const s = usbRef.current;
+    const d = buildDiagnostics({
+      siteVersion: SITE_VERSION,
+      userAgent: navigator.userAgent,
+      transport: s ? "usb" : "webrtc",
+      quality,
+      fluidity,
+      phoneFluidity: phoneFluidity ? phoneFluidity.profile : "—",
+      videoMode,
+      dec: s?.decoderOptions ?? DEFAULT_DEC,
+      info: s?.snapshot.info ?? null,
+      link: probe.current.summary(),
+      clock: probe.current.clockOffset(),
+      video: s ? s.videoSummary() : null,
+      vstat: s?.phoneVstat ?? null,
+      session: s ? (s.diagnostics() as unknown as Record<string, unknown>) : null,
+      flash: s?.lastFlashResult ?? null,
+      adb: usbOpenerRef.current?.diag?.() ?? null,
+      now: new Date(),
+    });
+    const text = diagnosticsText(d);
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand("copy");
+        ta.remove();
+      } catch {}
+    }
+    setCopyNote(ok ? "Diagnóstico copiado ✔" : "Não consegui copiar (permita a área de transferência)");
+    setTimeout(() => setCopyNote(""), 4000);
   };
 
   const leaveUsb = () => {
@@ -816,6 +916,11 @@ export default function Page() {
         onFluidity={changeFluidity}
         phoneFluidity={connected ? (phoneLevel === 2 ? phoneFluidity ?? "pending" : "old") : null}
         link={connected ? link : null}
+        video={
+          usbMode && connected
+            ? { mode: videoMode, onMode: changeVideoMode, line: videoLine, flash, onFlash: runFlash, onCopyDiag: copyDiag, copyNote }
+            : undefined
+        }
         exit={
           usbMode
             ? { label: "Sair do USB", onClick: leaveUsb }

@@ -28,6 +28,7 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         if (instance === this) instance = null
         RotationController.onServiceGone(this)
+        FlashController.onServiceGone(this)
         if (::injector.isInitialized) injector.shutdown()
         return super.onUnbind(intent)
     }
