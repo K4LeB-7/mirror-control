@@ -6,6 +6,7 @@ import {
   BACKPRESSURE_LOWLAT,
   DEFAULT_DEC,
   type DecOptions,
+  decText,
   type VideoSummary,
   VideoMetrics,
   shouldDropForBackpressure,
@@ -118,6 +119,7 @@ export class UsbSession {
   } | null = null;
   private sampleCtx: (CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D) | null = null;
   private pendingOutAt = 0;
+  private decFellBack = false;
   private bpAt = 0;
   private bpDecodedAt = -1;
   private microQueued = false;
@@ -161,11 +163,18 @@ export class UsbSession {
     this.clock = fn;
   }
 
+  private offCache: number | null = null;
+  private offAt = -1e9;
+
+  /** Offset em cache (recalculado a cada 250 ms: o cálculo aloca; os quadros chegam a 60/s e não podem alocar). */
   private offsetMs(): number | null {
+    const now = performance.now();
+    if (now - this.offAt < 250) return this.offCache;
+    this.offAt = now;
     // Idade/chegada só fazem sentido com o offset E com o relógio do PTS confirmado pelo app (vstat.clk != "unk").
     const v = this.vstat;
-    if (!v || performance.now() - this.vstatAt > VSTAT_FRESH_MS || v.clk === "unk" || v.enc === null) return null;
-    return this.clock?.()?.offsetMs ?? null;
+    this.offCache = !v || now - this.vstatAt > VSTAT_FRESH_MS || v.clk === "unk" || v.enc === null ? null : (this.clock?.()?.offsetMs ?? null);
+    return this.offCache;
   }
 
   /** Perfil de vídeo local (e o que foi pedido ao app). */
@@ -477,6 +486,18 @@ export class UsbSession {
     const { ptsUs, data } = parseVideoPayload(payload);
     const now = performance.now();
     this.metrics.onArrive(payload.length, key);
+    if (!this.decFellBack && this.decOpts !== DEFAULT_DEC && this.metrics.submitted >= 60 && this.metrics.decoded === 0) {
+      // `?dec=` (diagnóstico) deixou o decodificador mudo (ex.: prefer-hardware sem decodificador por hardware): volta ao padrão.
+      this.decFellBack = true;
+      this.note(`Decodificador (${decText(this.decOpts)}) não entregou quadros; voltando ao padrão`);
+      this.decOpts = DEFAULT_DEC;
+      const info = this.state.info;
+      if (info) {
+        this.setupDecoder(info);
+        this.requestKeyFrame();
+      }
+      return;
+    }
     if (!key) {
       if (this.waitingKey) {
         this.stats.dropped++;
@@ -519,6 +540,12 @@ export class UsbSession {
 
   private onDecodeError(d: VideoDecoder, e: unknown) {
     if (d !== this.decoder) return;
+    if (this.decOpts !== DEFAULT_DEC && !this.decFellBack) {
+      // `?dec=` (diagnóstico) não funciona neste navegador (ex.: prefer-hardware sem decodificador por hardware): padrão.
+      this.decFellBack = true;
+      this.note(`Decodificador (${decText(this.decOpts)}) falhou (${String(e)}); voltando ao padrão`);
+      this.decOpts = DEFAULT_DEC;
+    }
     const now = performance.now();
     this.decodeErrors = [...this.decodeErrors.filter((t) => now - t < 10_000), now];
     this.note(`Erro no decodificador de vídeo: ${String(e)}`);

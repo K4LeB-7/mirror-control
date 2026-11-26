@@ -35,7 +35,7 @@ export function buildDiagnostics(i: DiagInput) {
   const v = i.video;
   const f = i.flash;
   const resumo: string[] = [
-    `Mirror Control site ${i.siteVersion} · app ${i.vstat?.mode !== undefined ? "0.3.4+" : "sem vstat (anterior à 0.3.4?)"} · ${i.transport.toUpperCase()}`,
+    `Mirror Control site ${i.siteVersion} · app ${i.vstat ? i.vstat.ver || "0.3.4+" : "sem vstat (anterior à 0.3.4?)"} · ${i.transport.toUpperCase()}`,
     i.info ? `Vídeo ${i.info.width}×${i.info.height} @ ${i.info.fps} fps (${i.info.codec}), qualidade pedida ${i.quality.height}p${i.quality.fps}` : "Sem INFO de vídeo",
     `Perfil de vídeo: ${i.videoMode} · decodificador ${decText(i.dec)} · fluidez ${i.fluidity} (celular: ${i.phoneFluidity})`,
     v?.age

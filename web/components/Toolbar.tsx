@@ -49,7 +49,7 @@ type Props = {
     onMode: (m: VideoMode) => void;
     /** "Vídeo: idade na tela 52/70 ms · …" (ou "Vídeo: —"). */
     line: string;
-    flash: { state: "idle" | "running" | "done" | "error"; text: string };
+    flash: { state: "idle" | "running" | "done" | "error"; text: string; detail?: string };
     onFlash: () => void;
     onCopyDiag: () => void;
     /** Resultado do último "Copiar diagnóstico" (texto curto). */
@@ -69,10 +69,10 @@ const btn =
   "whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40";
 const on = "border-sky-400 bg-sky-700 hover:bg-sky-600";
 
-function Group({ label, children }: { label: string; children: React.ReactNode }) {
+function Group({ label, children, bare }: { label: string; children: React.ReactNode; bare?: boolean }) {
   return (
     <div className="flex items-center gap-1" role="group" aria-label={label}>
-      <span className="mr-0.5 hidden text-[10px] uppercase tracking-wider text-zinc-500 lg:inline">{label}</span>
+      {!bare && <span className="mr-0.5 hidden text-[10px] uppercase tracking-wider text-zinc-500 lg:inline">{label}</span>}
       {children}
     </div>
   );
@@ -190,7 +190,7 @@ export default function Toolbar(p: Props) {
       </Group>
 
       {p.video && (
-        <Group label="Vídeo">
+        <Group label="Vídeo" bare>
           <select
             aria-label="Perfil de vídeo"
             data-testid="video-mode"
@@ -255,7 +255,7 @@ export default function Toolbar(p: Props) {
         {p.connectionOk && p.canControl && (
           <span
             data-testid="link-stats"
-            className="shrink-0 whitespace-nowrap rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
+            className="min-w-0 shrink truncate whitespace-nowrap rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
             title="Ping a cada 1 s (últimos 20). tecla→celular ≈ RTT/2 + tempo do app; celular→toque = espera medida no celular até o dispatchGesture (mediana). Sem resposta = app antigo."
           >
             {linkText(p.link)}
@@ -264,7 +264,7 @@ export default function Toolbar(p: Props) {
         {p.video && (
           <span
             data-testid="video-stats"
-            className="min-w-0 shrink truncate rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
+            className="shrink-0 whitespace-nowrap rounded bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-400"
             title="Idade do quadro no desenho = agora − offset de relógio − pts (captura no celular). cod. = captura+codificação no celular (mediana); cabo+dec. = cabo+fila+decodificação (mediana). Sem app 0.3.4 mostra —."
           >
             {p.video.line}
@@ -274,8 +274,8 @@ export default function Toolbar(p: Props) {
           <span
             data-testid="flash-result"
             data-state={p.video.flash.state}
-            title={p.video.flash.text}
-            className={`min-w-0 shrink truncate rounded px-2 py-0.5 text-[11px] ${p.video.flash.state === "error" ? "bg-rose-900 text-rose-100" : "bg-emerald-900 text-emerald-100"}`}
+            title={p.video.flash.detail || p.video.flash.text}
+            className={`shrink-0 whitespace-nowrap rounded px-2 py-0.5 text-[11px] ${p.video.flash.state === "error" ? "bg-rose-900 text-rose-100" : "bg-emerald-900 text-emerald-100"}`}
           >
             {p.video.flash.text}
           </span>

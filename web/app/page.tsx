@@ -39,7 +39,7 @@ import {
 import { CtrlMessage, FluidityProfile, NavAction, RotateMode, VideoMode, isFluidityProfile, isVideoMode, parsePhoneCtrl } from "@/lib/protocol";
 import { LinkProbe, LinkSummary, PING_INTERVAL_MS } from "@/lib/linkProbe";
 import { buildDiagnostics, diagnosticsText } from "@/lib/diagnostics";
-import { flashText } from "@/lib/flashProbe";
+import { flashDetail, flashText } from "@/lib/flashProbe";
 import { DEFAULT_DEC, parseDecOptions, videoLineText } from "@/lib/videoStats";
 import { SITE_VERSION } from "@/lib/version";
 import { RemoteSession, SessionState } from "@/lib/session";
@@ -109,7 +109,7 @@ export default function Page() {
   /** Perfil de vídeo (USB, site 0.3.4): padrão novo = Baixa latência; escolhido e salvo no navegador. */
   const [videoMode, setVideoMode] = useState<VideoMode>("lowlat");
   const [videoLine, setVideoLine] = useState("Vídeo: —");
-  const [flash, setFlash] = useState<{ state: "idle" | "running" | "done" | "error"; text: string }>({ state: "idle", text: "" });
+  const [flash, setFlash] = useState<{ state: "idle" | "running" | "done" | "error"; text: string; detail?: string }>({ state: "idle", text: "" });
   const [copyNote, setCopyNote] = useState("");
   const usbOpenerRef = useRef<ChannelOpener | null>(null);
 
@@ -764,7 +764,7 @@ export default function Page() {
     if (!s || flash.state === "running") return;
     setFlash({ state: "running", text: "Medindo: o app vai piscar um quadrado no canto da tela do celular…" });
     const r = await s.startFlashTest();
-    setFlash({ state: r.ok ? "done" : "error", text: flashText(r) });
+    setFlash({ state: r.ok ? "done" : "error", text: flashText(r), detail: flashDetail(r) });
   };
 
   const copyDiag = async () => {

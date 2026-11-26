@@ -19,6 +19,7 @@ import {
 import {
   FLASH_SQUARE_FRACTION,
   PulseDetector,
+  flashDetail,
   flashRegion,
   flashText,
   matchPulses,
@@ -331,7 +332,8 @@ test("summarizeFlash/flashText: mediana, mín, máx", () => {
   assert.equal(r.min, 58);
   assert.equal(r.max, 64);
   assert.equal(r.n, 5);
-  assert.equal(flashText(r), "Latência real do vídeo: 61 ms (mín 58 · máx 64 · 5 pulsos, ±4 ms de relógio)");
+  assert.equal(flashText(r), "Latência real do vídeo: 61 ms (mín 58 · máx 64)");
+  assert.equal(flashDetail(r), "5 pulsos medidos de 5; por pulso 60/62/58/64/61 ms; erro máximo do relógio ±4 ms (assimetria ida/volta); não inclui o compositor do Chrome e o monitor");
   assert.equal(summarizeFlash([{ n: 1, latencyMs: 50 }], 5, 1, 0, 0).ok, false); // 1 pulso só não basta
   assert.equal(summarizeFlash([{ n: 1, latencyMs: 50 }, { n: 2, latencyMs: 70 }], 5, 1, 0, 0).median, 60); // par: média dos do meio
   assert.equal(flashText({ ...r, ok: false, error: "sem acessibilidade" }), "sem acessibilidade");

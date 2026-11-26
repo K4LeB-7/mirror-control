@@ -203,6 +203,47 @@ um USB simulado SEM "delayed ack" e 1 ms por transferência — pessimista; o ap
 Tabelas completas (60/90/120 Hz, ipc 1 e 3 ms, contribuição de cada mudança): `gradle testDebugUnitTest` grava
 `android/app/build/multiaction-before-after.txt` e `multiaction-ablation.txt`.
 
+### Latência do vídeo (0.3.4): medir, copiar o diagnóstico e comparar "Baixa latência" × "Padrão"
+A linha **Enlace** da barra mede só a ENTRADA (tecla → celular). A 0.3.4 mede também a VOLTA do vídeo (captura no
+celular → codificação → cabo/ADB → decodificação → desenho no navegador). Vale só no **modo USB**, com app **0.3.4** e
+site novo (com app antigo a linha mostra "—"). Detalhes técnicos em [USB_PROTOCOLO.md](USB_PROTOCOLO.md#latência-do-vídeo-034).
+
+**Linha "Vídeo" na barra** (≈ 1 atualização por segundo):
+`Vídeo: idade na tela 52/70 ms · cod. 18 · cabo+dec. 12 · fila 0 · 59 fps`
+- *idade na tela* p50/p95: há quanto tempo o quadro desenhado foi capturado no celular (agora − relógio do celular − PTS
+  do quadro). É a latência do vídeo, sem o monitor. Precisa do offset de relógio (alguns segundos depois de conectar).
+- *cod.*: captura + codificação no celular (mediana, medida pelo app). *cabo+dec.*: cabo ADB + fila + decodificação
+  (mediana). *fila*: quadros esperando o decodificador do navegador. *fps*: quadros desenhados por segundo.
+- "—" na idade = app antigo, relógio ainda não sincronizado ou PTS não confirmado pelo app. Não é erro.
+
+**Botão "Medir latência do vídeo"** (1 clique, leva ~3 s): o app pisca um quadrado branco/preto no **canto superior
+esquerdo da tela do celular** (5 pulsos) e o site mede quanto tempo cada pulso leva até aparecer no vídeo. Resultado na
+barra: `Latência real do vídeo: 62 ms (mín 55 · máx 70 · 5 pulsos, ±8 ms de relógio)`. É a medida mais confiável (não
+depende de PTS nem de a tela estar parada). Requisitos: serviço de **acessibilidade** ligado (o quadrado é uma janela dele;
+sem ele o site avisa "ative o serviço de acessibilidade…") e conteúdo qualquer na tela. O quadrado some sozinho ao
+terminar, ao desconectar ou ao desligar a acessibilidade. A margem "±N ms" é o erro máximo do relógio (metade da
+assimetria ida/volta, ≈ RTT/2); some ~1 quadro do monitor (8–17 ms) que fica depois do desenho no canvas.
+
+**Botão "Copiar diagnóstico"**: copia para a área de transferência um JSON com tudo (versões do site e do app, perfil de
+vídeo, decodificador, resolução/fps/bitrate, idade na tela e cada parcela, fila/descartes, fps recebido/decodificado/
+desenhado, maior IDR, entrada (RTT, tecla→celular, celular→toque), relógio (offset e incerteza), resultado do último
+teste de latência e dados do ADB). Cole numa conversa. Não inclui PIN, número de série nem a sala.
+
+**Perfil de vídeo ("Baixa latência" × "Padrão (0.3.3)")**: caixa **Vídeo** da barra; a escolha fica salva no navegador.
+"Baixa latência" (padrão do site novo): desenho direto no decodificador (sem esperar o rAF), contrapressão mais curta,
+I-frame a cada 4 s, `latency=1`, bitrate 75 % e fila de saída curta no app. "Padrão (0.3.3)" = o comportamento anterior.
+Trocar reconfigura o encoder sem derrubar a conexão (a imagem pisca por um instante).
+**Como comparar no aparelho (A/B):**
+1. Conecte por USB, espere ~10 s (offset de relógio) e deixe algo se mexendo na tela.
+2. Em "Baixa latência": clique **Medir latência do vídeo** 2–3 vezes e anote as medianas + a linha "idade na tela p50/p95".
+3. Troque para "Padrão (0.3.3)", espere ~10 s e repita. Compare a mediana do teste e o p95 da idade; veja também o jogo
+   (quadro-chave a cada 4 s pode dar um soluço maior quando um quadro se perde; se perceber, diga qual foi).
+4. **Copiar diagnóstico** em cada perfil e cole os dois. `app.nivelEncoder` = 3 mostra que o encoder aceitou
+   `latency`/`operating-rate`; 2 com `chaveRecusada` preenchida = recusou (o app seguiu sem elas).
+5. Opcional: `?dec=lat0` (optimizeForLatency desligado), `?dec=sw` ou `?dec=hw` na URL do site trocam o decodificador do
+   navegador para comparar com o mesmo teste. O padrão (`lat1`, sem preferência) só muda depois de medir.
+Os números do teste dependem do aparelho, do cabo e do PC: nada aqui promete um ganho — meça.
+
 ### Ver os toques ao vivo ("Local do ponteiro")
 *Opções do desenvolvedor* (Xiaomi/HyperOS: *Configurações adicionais → Opções do desenvolvedor*) → seção **Entrada** →
 ligue **Local do ponteiro** (em inglês "Pointer location"; **Mostrar toques** é uma versão mais simples). Uma barra no

@@ -116,3 +116,90 @@ test("reliable = true (o InputController desliga cópias/keepalive/deadman no US
   assert.equal(s.reliable, true);
   s.close();
 });
+
+// ---------------------------------------------------------------- 0.3.4: perfil de vídeo, vstat e teste de latência
+const ctrlsOf = (ws: Pending[]) => decodeAll(ws).filter((x) => x.type === FrameType.CTRL).map((x) => new TextDecoder().decode(x.payload));
+
+test("0.3.4: CTRL video é guardado, aplicado localmente e reenviado a cada conexão (junto do quality)", async () => {
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  assert.equal(s.mode, "legacy", "sem CTRL video (site antigo/teste): comportamento da 0.3.3");
+  s.sendCtrl({ type: "quality", height: 720, fps: 60 });
+  s.sendCtrl({ type: "video", mode: "lowlat" });
+  assert.equal(s.mode, "lowlat");
+  await tick();
+  const sent = ctrlsOf(f.writes);
+  assert.ok(sent.includes('{"type":"quality","height":720,"fps":60}'));
+  assert.ok(sent.includes('{"type":"video","mode":"lowlat"}'));
+  s.close();
+});
+
+test("0.3.4: vstat do app é consumido (e continua indo ao onCtrl); app antigo = sem vstat", async () => {
+  const seen: string[] = [];
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {}, onCtrl: (t) => seen.push(t) });
+  await tick();
+  assert.equal(s.phoneVstat, null);
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  const vstat = '{"type":"vstat","seq":1,"enc":{"p50":8,"p95":9,"max":10},"clk":"mono","mode":"lowlat","keyMaxKB":90.5}';
+  f.deliver(encodeText(FrameType.CTRL, vstat));
+  await tick();
+  const v = s.phoneVstat as { enc?: { p50: number } | null; keyMaxKB?: number } | null;
+  assert.equal(v?.enc?.p50, 8);
+  assert.equal(v?.keyMaxKB, 90.5);
+  assert.deepEqual(seen, [vstat]);
+  assert.equal(s.videoSummary().enc?.p50, 8);
+  assert.equal(s.videoSummary().age, null, "sem offset de relógio: sem idade");
+  s.close();
+});
+
+test("0.3.4: teste de latência sem sincronismo de relógio / app antigo → mensagem clara, nada enviado ao app", async () => {
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  const r = await s.startFlashTest();
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /Relógio do celular ainda não sincronizado/);
+  assert.equal(ctrlsOf(f.writes).filter((m) => /flash/.test(m)).length, 0);
+  s.close();
+});
+
+test("0.3.4: teste de latência: envia flash, e o status de falha do app encerra com a mensagem dele; pedido duplo é recusado", async () => {
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  s.setClock(() => ({ offsetMs: 0, uncertaintyMs: 5, rttMs: 10, n: 3 }));
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  const p = s.startFlashTest();
+  const dup = await s.startFlashTest();
+  assert.equal(dup.ok, false);
+  assert.match(dup.error!, /em andamento/);
+  await tick();
+  assert.equal(ctrlsOf(f.writes).filter((m) => m === '{"type":"flash"}').length, 1);
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"status","scope":"flash","ok":false,"text":"ative a acessibilidade"}'));
+  const r = await p;
+  assert.equal(r.ok, false);
+  assert.equal(r.error, "ative a acessibilidade");
+  s.close();
+});
+
+test("0.3.4: fim do teste sem nenhum pulso detectado → erro explicando (o quadrado não entrou na captura)", async () => {
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  s.setClock(() => ({ offsetMs: 0, uncertaintyMs: 5, rttMs: 10, n: 3 }));
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  const p = s.startFlashTest();
+  await tick();
+  for (let n = 1; n <= 5; n++) f.deliver(encodeText(FrameType.CTRL, `{"type":"flashAck","n":${n},"pm":${n * 600 * 1000},"vs":8333}`));
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"flashAck","n":0,"end":1,"pulses":5}'));
+  const r = await p; // o fim fecha a conta depois de ~400 ms; sem quadros decodificados (node) não há bordas
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /Só 0 de 5 pulsos apareceram no vídeo/);
+  assert.equal(s.lastFlashResult, r);
+  s.close();
+});

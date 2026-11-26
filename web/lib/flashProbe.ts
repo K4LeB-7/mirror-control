@@ -134,9 +134,15 @@ export function summarizeFlash(pairs: FlashPair[], pulses: number, uncertaintyMs
   return { ok: l.length >= 2, latencies: l, median, min: s[0] ?? 0, max: s[s.length - 1] ?? 0, n: l.length, pulses, uncertaintyMs, offsetMs, at };
 }
 
-/** "Latência real do vídeo: 62 ms (mín 55 · máx 70 · 5 pulsos, ±4 ms de relógio)". */
+/** Texto curto da barra: "Latência real do vídeo: 62 ms (mín 55 · máx 70)". Pulsos e margem de relógio: [flashDetail]. */
 export function flashText(r: FlashResult): string {
   if (!r.ok) return r.error ?? "Teste de latência sem resultado";
   const f = (v: number) => Math.round(v).toString();
-  return `Latência real do vídeo: ${f(r.median)} ms (mín ${f(r.min)} · máx ${f(r.max)} · ${r.n} pulsos, ±${f(Math.max(1, r.uncertaintyMs))} ms de relógio)`;
+  return `Latência real do vídeo: ${f(r.median)} ms (mín ${f(r.min)} · máx ${f(r.max)})`;
+}
+
+/** Detalhe (tooltip/diagnóstico): "5 pulsos medidos de 5; por pulso 60/62/58/64/61 ms; margem do relógio ±4 ms". */
+export function flashDetail(r: FlashResult): string {
+  if (!r.ok) return r.error ?? "";
+  return `${r.n} pulsos medidos de ${r.pulses}; por pulso ${r.latencies.map((x) => Math.round(x)).join("/")} ms; erro máximo do relógio ±${Math.max(1, Math.round(r.uncertaintyMs))} ms (assimetria ida/volta); não inclui o compositor do Chrome e o monitor`;
 }

@@ -44,6 +44,13 @@ Site: https://mirror-control.vercel.app
    **Diagnóstico de toque**. Medições (modelo do AOSP e navegador) em
    [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#fluidez-e-latência-033-perfis-e-como-comparar-no-aparelho).
 
+7. **Latência do vídeo (site e app 0.3.4, modo USB)**: instrumentação ponta a ponta (PTS = captura, offset de relógio por
+   ping/pong, `vstat` do encoder, idade do quadro no desenho), botão **Medir latência do vídeo** (quadrado branco/preto no
+   canto da tela pelo serviço de acessibilidade, detectado nos quadros decodificados), **Copiar diagnóstico**, e o
+   perfil de vídeo **Baixa latência** (padrão) × **Padrão (0.3.3)** para comparar no aparelho. Guia em
+   [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#latência-do-vídeo-034-medir-copiar-o-diagnóstico-e-comparar-baixa-latência--padrão),
+   protocolo em [docs/USB_PROTOCOLO.md](docs/USB_PROTOCOLO.md#latência-do-vídeo-034).
+
 ## Web (testado: `tsc` e `next build` passam)
 ```bash
 cd web && npm install && npm run dev      # http://localhost:3000
@@ -66,4 +73,4 @@ Uma notificação fixa com botão **Parar** fica visível enquanto a tela é com
 - Injeção por `dispatchGesture` tem latência de dezenas de ms; jogos com anti-cheat podem bloquear toques injetados.
   O ID da sala é o único segredo de pareamento.
 
-Versão do app no código: 0.3.3 (versionCode 12). O APK publicado em `apk/` (ver `apk/version.json`) é trocado na publicação.
+Versão do app no código: 0.3.4 (versionCode 13). O APK publicado em `apk/` (ver `apk/version.json`) é trocado na publicação.
