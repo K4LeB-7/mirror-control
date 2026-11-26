@@ -469,3 +469,132 @@ test("diagnóstico: reúne tudo, sem PIN/série, e sobrevive a dados ausentes", 
   assert.equal(ej.video.idadeNaTelaMs, null);
   assert.ok(ej.resumo.some((l: string) => /Idade do quadro na tela: —/.test(l)));
 });
+
+// ---------------------------------------------------------------- revisão 0.3.4: relógio (pq, salto, deriva) e flash
+/**
+ * Ping/pong como o app revisado: o pong espera `queueMs` na fila de saída atrás de vídeo; `pm` é carimbado na ida ao
+ * socket e `pq` = recebimento → ida. `phoneOffset(tBrowser)` = relógio do celular − navegador (muda num salto/deriva).
+ */
+function probeRev(samples: { out: number; back: number; queueMs: number; withPq: boolean }[], phoneMinusBrowser: (t: number) => number) {
+  let clock = 1000;
+  const probe = new LinkProbe(() => clock);
+  for (const s of samples) {
+    const ping = probe.ping();
+    const recv = ping.t + s.out;
+    const leave = recv + 0.1 + s.queueMs; // tratou em 0,1 ms e esperou a fila
+    const stamp = s.withPq ? leave : recv + 0.1; // app revisado carimba na ida; 0.3.4 original, antes da fila
+    const pm = (stamp + phoneMinusBrowser(stamp)) * 1000;
+    clock = leave + s.back;
+    const pong: PhonePong = { type: "pong", t: ping.t, p: 100, d: -1, pm, ...(s.withPq ? { pq: Math.round((leave - recv) * 1000) } : {}) };
+    assert.equal(probe.onPong(pong), true);
+    clock += 1000;
+  }
+  return probe;
+}
+
+test("revisão: pong carimbado na ida ao socket (pq) tira a espera da fila de vídeo da assimetria", () => {
+  const trueOff = -7000; // browser = phone − 7000 → phoneMinusBrowser = +7000
+  const rows = Array.from({ length: 10 }, () => ({ out: 3, back: 3, queueMs: 25, withPq: true }));
+  const c = probeRev(rows, () => 7000).clockOffset()!;
+  assert.ok(Math.abs(c.offsetMs - trueOff) < 0.05, `offset ${c.offsetMs}`);
+  assert.ok(c.uncertaintyMs < 3.1, `incerteza só do cabo (3 ms), sem a fila: ${c.uncertaintyMs}`);
+  // o mesmo cenário com o pong carimbado ANTES da fila (sem pq): viés de ~fila/2 para mais, coberto pela incerteza
+  const old = probeRev(rows.map((r) => ({ ...r, withPq: false })), () => 7000).clockOffset()!;
+  assert.ok(Math.abs(old.offsetMs - trueOff - 12.5) < 0.1, `viés antigo ${old.offsetMs - trueOff}`);
+  assert.ok(Math.abs(old.offsetMs - trueOff) <= old.uncertaintyMs + 0.1);
+});
+
+test("revisão: salto de relógio (celular dormiu 30 s) é detectado e a estimativa recomeça na hora", () => {
+  const rows = Array.from({ length: 12 }, () => ({ out: 2, back: 2, queueMs: 0, withPq: true }));
+  // as 6 primeiras com o relógio antigo; depois o MONOTONIC "perdeu" 30 s (dormiu): celular − navegador cai 30 000 ms
+  let i = 0;
+  const p = probeRev(rows, () => (i++ < 6 ? 7000 : 7000 - 30_000));
+  const c = p.clockOffset()!;
+  assert.equal(c.jumps, 1);
+  assert.equal(c.n, 6, "só as amostras depois do salto");
+  assert.ok(Math.abs(c.offsetMs - (-7000 + 30_000)) < 0.05, `offset novo ${c.offsetMs}`);
+});
+
+test("revisão: deriva de 100 ppm por 20 s não é confundida com salto e o erro fica dentro da incerteza", () => {
+  const rows = Array.from({ length: 20 }, () => ({ out: 1.5, back: 1.5, queueMs: 0, withPq: true }));
+  const p = probeRev(rows, (t) => 7000 + t * 1e-4);
+  const c = p.clockOffset()!;
+  assert.equal(c.jumps, 0);
+  assert.equal(c.n, 20);
+  const trueNow = -(7000 + (1000 + 20 * 1003) * 1e-4);
+  assert.ok(Math.abs(c.offsetMs - trueNow) <= c.uncertaintyMs + 2.1, `erro ${c.offsetMs - trueNow}`);
+});
+
+test("revisão: amostras com mais de 30 s saem da janela", () => {
+  let clock = 0;
+  const probe = new LinkProbe(() => clock);
+  const one = (pm: number) => {
+    const ping = probe.ping();
+    clock += 2;
+    probe.onPong({ type: "pong", t: ping.t, p: 0, d: -1, pm, pq: 0 });
+  };
+  one((clock + 1) * 1000);
+  clock += 40_000;
+  one((clock + 1) * 1000);
+  assert.equal(probe.clockOffset()!.n, 1);
+});
+
+test("revisão: parser do pong lê pq (e ignora pq inválido)", () => {
+  const a = parsePhoneCtrl('{"type":"pong","t":1.5,"p":80,"d":2,"pm":123,"pq":4567}') as PhonePong;
+  assert.equal(a.pq, 4567);
+  const b = parsePhoneCtrl('{"type":"pong","t":1.5,"p":80,"d":2,"pm":123,"pq":-3}') as PhonePong;
+  assert.equal(b.pq, undefined);
+});
+
+test("revisão: flash ignora piscadas do conteúdo com duração errada e mede captura − pm sem o offset", () => {
+  const d = new PulseDetector();
+  const offset = 100; // browser = phone + 100
+  const acks = [1, 2, 3].map((n) => ({ n, pm: (300 + (n - 1) * 600) * 1000 })); // pm em µs do celular
+  const feed = (ms: number, luma: number, ptsUs = NaN) => d.push(ms, luma, ptsUs);
+  feed(0, 10);
+  // conteúdo do app piscando no canto: claro por 40 ms logo antes do pulso 1 (não é o quadrado)
+  feed(380, 220, 280_000);
+  feed(420, 10);
+  // pulsos reais: o 1º quadro claro tem pts = pm + 5 ms (captura logo depois da apresentação estimada) e chega 60 ms depois
+  for (const a of acks) {
+    const tp = a.pm / 1000 + offset;
+    feed(tp + 60, 230, a.pm + 5000);
+    feed(tp + 360, 12);
+  }
+  const m = matchPulses(d.edges, acks, offset, 20, 2000, { highMs: d.highMs, edgePts: d.edgePts });
+  assert.equal(m.rejected, 1);
+  assert.deepEqual(m.pairs.map((p) => Math.round(p.latencyMs)), [60, 60, 60]);
+  const r = summarizeFlash(m.pairs, 3, 2, offset, 0);
+  assert.equal(r.captureLagMs, 5);
+  assert.match(flashDetail(r), /captura − apresentação estimada 5 ms/);
+  // sem o filtro de formato a piscada de 40 ms seria tomada como o pulso 1 (latência errada)
+  const naive = matchPulses(d.edges, acks, offset);
+  assert.notEqual(Math.round(naive.pairs[0].latencyMs), 60);
+});
+
+test("revisão: amostra colorida não é o quadrado (croma) e pulsos incoerentes são descartados", async () => {
+  const { meanChromaRGBA, NEUTRAL_MAX_CHROMA } = await import("../lib/flashProbe.ts");
+  const px = (r: number, g: number, b: number) => Uint8Array.from(Array.from({ length: 64 }, () => [r, g, b, 255]).flat());
+  assert.equal(meanChromaRGBA(px(255, 255, 255)), 0);
+  assert.ok(meanChromaRGBA(px(16, 18, 15)) < 5); // preto do H.264 (faixa limitada) continua neutro
+  assert.ok(meanChromaRGBA(px(230, 200, 30)) > NEUTRAL_MAX_CHROMA); // amarelo do conteúdo
+  // conteúdo colorido: escuro-azul → claro-amarelo NÃO é borda; o quadrado (preto → branco) é
+  const d = new PulseDetector();
+  d.push(0, 30, NaN, meanChromaRGBA(px(10, 20, 200))); // azul escuro (luma < 64) mas colorido
+  assert.equal(d.push(16, 200, NaN, meanChromaRGBA(px(230, 200, 30))), false);
+  assert.equal(d.state, "unknown");
+  d.push(32, 5, NaN, 0);
+  assert.equal(d.push(48, 250, NaN, 0), true);
+  // um pulso branco que vira colorido no meio é invalidado (duração ∞ → rejeitado pelo formato)
+  d.push(64, 200, NaN, 90);
+  assert.equal(d.highMs[0], Infinity);
+  // coerência: 3 pulsos coerentes + 2 bordas de outra coisa → só os 3 contam
+  const r = summarizeFlash([60, 400, 62, 58, 900].map((latencyMs, i) => ({ n: i + 1, latencyMs })), 5, 2, 0, 0);
+  assert.equal(r.ok, true);
+  assert.equal(r.n, 3);
+  assert.equal(r.outliers, 2);
+  assert.equal(r.max, 62);
+  // latências espalhadas (bordas aleatórias do conteúdo): sem maioria coerente → sem resultado
+  const bad = summarizeFlash([20, 300, 520, 160].map((latencyMs, i) => ({ n: i + 1, latencyMs })), 5, 2, 0, 0);
+  assert.equal(bad.ok, false);
+});

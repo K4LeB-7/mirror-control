@@ -18,22 +18,34 @@ export const PING_WINDOW = 20;
 export const CLOCK_WINDOW = 20;
 
 /**
- * Offset de relógio navegador ↔ celular (app 0.3.4+, pong com `pm` = relógio monotônico do celular em µs).
- * `browserMs = phoneMs + offsetMs`. Estimativa NTP: o pong foi montado no meio do caminho, então
- * `offset = (t_envio + t_recv)/2 + p/2 − pm` (p = tempo do app tratando o ping, ≈ 0,1 ms); usa o ping de MENOR RTT
- * da janela (filtro de mínimo: pings que esbarraram em quadros de vídeo na fila de saída do celular, ou num
- * engasgo do USB, têm RTT maior e assimetria maior e são ignorados).
- * Incerteza: o erro é (atraso de ida − atraso de volta)/2, no pior caso (todo o atraso de um lado só) ≈ (RTT_mín − p)/2.
+ * Offset de relógio navegador ↔ celular (app 0.3.4+, pong com `pm` = relógio do celular em µs, na base do PTS).
+ * `browserMs = phoneMs + offsetMs`. Estimativa NTP: o celular recebeu o ping em `pm − pq` e mandou o pong em `pm`,
+ * então `offset = (t_envio + t_recv)/2 + pq/2 − pm` e o erro é (atraso de ida − atraso de volta)/2, no pior caso
+ * (todo o atraso de um lado só) ±(RTT − pq)/2 — a "incerteza" mostrada.
+ * - `pq` (app 0.3.4 revisado): o pong é carimbado na hora de ir ao socket e `pq` inclui a espera atrás dos quadros de
+ *   vídeo na fila do app; essa espera sai da assimetria. Sem `pq`, usa `p` (o pong carimbado antes da fila: a espera
+ *   entra no RTT, a incerteza cresce e cobre o viés, para mais).
+ * - Filtro de mínimo: usa o ping de MENOR RTT entre os últimos [CLOCK_WINDOW] (no máximo [CLOCK_MAX_AGE_MS] de idade):
+ *   pings que esbarraram em vídeo no cabo, ou num engasgo do USB, têm RTT e assimetria maiores e ficam de fora.
+ * - Salto de relógio (o celular dormiu: CLOCK_MONOTONIC para; ou a base mudou): cada amostra confina o offset real a
+ *   [off − u, off + u]; se a amostra nova não cruza a melhor (com folga de deriva de 100 ppm), as antigas são
+ *   descartadas e a estimativa recomeça (`jumps` conta).
  */
+export const CLOCK_MAX_AGE_MS = 30_000;
+const CLOCK_SLACK_MS = 0.5;
+const CLOCK_DRIFT = 1e-4;
+
 export type ClockOffset = {
   /** browser = celular + offsetMs. */
   offsetMs: number;
-  /** Erro máximo possível por assimetria (ms) = (RTT mínimo − p)/2. */
+  /** Erro máximo possível por assimetria (ms) = (RTT mínimo − pq)/2. */
   uncertaintyMs: number;
   /** RTT do ping escolhido (ms). */
   rttMs: number;
   /** Amostras na janela. */
   n: number;
+  /** Saltos de relógio detectados desde a conexão (a estimativa recomeçou). */
+  jumps?: number;
 };
 
 export type LinkSummary = {
@@ -50,12 +62,15 @@ export type LinkSummary = {
   keyToPhoneMs: number;
 };
 
+type ClockSample = { rtt: number; off: number; u: number; at: number };
+
 export class LinkProbe {
   private rtts: number[] = [];
   private apps: number[] = [];
   private lastD = -1;
   private outstanding = new Set<number>();
-  private clk: { rtt: number; off: number; p: number }[] = [];
+  private clk: ClockSample[] = [];
+  private jumps = 0;
 
   private now: () => number;
 
@@ -84,20 +99,38 @@ export class LinkProbe {
     if (this.apps.length > PING_WINDOW) this.apps.shift();
     this.lastD = p.d;
     if (p.pm !== undefined && Number.isFinite(p.pm)) {
-      const pMs = Math.max(0, p.p) / 1000;
-      const off = (t + t + rtt) / 2 + pMs / 2 - p.pm / 1000; // (t_envio + t_recv)/2, t_recv = t + rtt
-      this.clk.push({ rtt, off, p: pMs });
+      const now = t + rtt;
+      // pq (0.3.4 revisado) = recebimento → ida ao socket; sem ele, p (recebimento → tratamento).
+      const hold = Math.min(rtt, Math.max(0, p.pq ?? p.p) / 1000);
+      const off = (t + now) / 2 + hold / 2 - p.pm / 1000; // (t_envio + t_recv)/2 + pq/2 − pm
+      const u = Math.max(0, (rtt - hold) / 2);
+      this.clk = this.clk.filter((c) => now - c.at <= CLOCK_MAX_AGE_MS);
+      const best = this.bestClock();
+      if (best) {
+        const slack = CLOCK_SLACK_MS + CLOCK_DRIFT * (now - best.at);
+        if (Math.abs(off - best.off) > u + best.u + slack) {
+          // intervalos disjuntos: o relógio do celular saltou (dormiu/acordou) ou mudou de base → recomeça
+          this.clk = [];
+          this.jumps++;
+        }
+      }
+      this.clk.push({ rtt, off, u, at: now });
       if (this.clk.length > CLOCK_WINDOW) this.clk.shift();
     }
     return true;
   }
 
-  /** Offset de relógio pelo ping de menor RTT (null = app sem `pm` ou ainda sem pong). */
+  private bestClock() {
+    let best: ClockSample | null = null;
+    for (const c of this.clk) if (!best || c.u < best.u) best = c;
+    return best;
+  }
+
+  /** Offset de relógio pelo ping de menor incerteza (= menor RTT − pq) (null = app sem `pm` ou ainda sem pong). */
   clockOffset(): ClockOffset | null {
-    if (!this.clk.length) return null;
-    let best = this.clk[0];
-    for (const c of this.clk) if (c.rtt < best.rtt) best = c;
-    return { offsetMs: best.off, uncertaintyMs: Math.max(0, (best.rtt - best.p) / 2), rttMs: best.rtt, n: this.clk.length };
+    const best = this.bestClock();
+    if (!best) return null;
+    return { offsetMs: best.off, uncertaintyMs: best.u, rttMs: best.rtt, n: this.clk.length, jumps: this.jumps };
   }
 
   /** Conexão nova: esquece tudo. */
@@ -107,6 +140,7 @@ export class LinkProbe {
     this.lastD = -1;
     this.outstanding.clear();
     this.clk = [];
+    this.jumps = 0;
   }
 
   summary(): LinkSummary | null {

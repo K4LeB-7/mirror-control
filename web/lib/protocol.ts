@@ -110,7 +110,7 @@ export type PhoneCaps = { type: "caps"; input: number; profile: number; ping: nu
 export type PhoneProfile = { type: "profile"; profile: FluidityProfile; frameMs: number; text: string };
 
 /** Celular → navegador (app 0.3.3+): resposta ao ping. p = µs no app; d = mediana DOWN→dispatch (ms, -1 = sem dados). */
-export type PhonePong = { type: "pong"; t: number; p: number; d: number; profile?: FluidityProfile; /** app 0.3.4+: relógio monotônico do celular (µs, a base do PTS do vídeo). */ pm?: number };
+export type PhonePong = { type: "pong"; t: number; p: number; d: number; profile?: FluidityProfile; /** app 0.3.4+: relógio do celular (µs, a base do PTS do vídeo) na ida do pong ao socket. */ pm?: number; /** app 0.3.4+: µs entre o celular receber o ping e o pong ir ao socket (com `pm`). */ pq?: number };
 
 /** [p50, p95, max] em ms (a mesma definição de índices do app e do site: p50 = s[(n-1)/2], p95 = s[(n-1)*95/100]). */
 export type VstatPct = { p50: number; p95: number; max: number };
@@ -171,6 +171,7 @@ export function parsePhoneCtrl(text: string): PhoneStatus | PhoneCaps | PhonePro
         type: "pong", t: Number(j.t), p: Number(j.p) || 0, d: Number.isFinite(Number(j.d)) ? Number(j.d) : -1,
         profile: isFluidityProfile(j.profile) ? j.profile : undefined,
         ...(j.pm !== undefined && j.pm !== null && Number.isFinite(Number(j.pm)) ? { pm: Number(j.pm) } : {}),
+        ...(j.pq !== undefined && j.pq !== null && Number.isFinite(Number(j.pq)) && Number(j.pq) >= 0 ? { pq: Number(j.pq) } : {}),
       };
     if (j && j.type === "vstat")
       return {

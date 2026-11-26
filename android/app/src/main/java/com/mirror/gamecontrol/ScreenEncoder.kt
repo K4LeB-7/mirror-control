@@ -62,15 +62,7 @@ class ScreenEncoder(
 
     fun start(p: Params) {
         stop()
-        val c = createCodec(p)
-        val s: Surface
-        try {
-            s = c.createInputSurface()
-            c.start()
-        } catch (e: Exception) {
-            c.release()
-            throw e
-        }
+        val (c, s) = createStartedCodec(p)
         try {
             val d = display
             if (d == null) {
@@ -165,23 +157,33 @@ class ScreenEncoder(
         }
     }
 
-    private fun createCodec(p: Params): MediaCodec {
+    /**
+     * Cria, configura e inicia o codec, descendo de nível quando o encoder recusa: no `configure` OU depois dele
+     * (alguns encoders aceitam a chave no configure e só falham em createInputSurface/start). Sem isso, uma chave do
+     * nível 3 recusada no start derrubaria a sessão e a reconexão repetiria a mesma falha para sempre.
+     */
+    private fun createStartedCodec(p: Params): Pair<MediaCodec, Surface> {
         var last: Exception? = null
         rejected = ""
         // 3 = baixa latência (latency + operating-rate; só no modo LOWLAT); 2 = tudo (perfil, CBR, prioridade,
         // low-latency); 1 = perfil + CBR; 0 = o mínimo que todo encoder aceita.
         for (tier in (if (p.mode == VideoMode.LOWLAT) 3 else 2) downTo 0) {
-            val c = MediaCodec.createEncoderByType(MIME)
+            val c = try { MediaCodec.createEncoderByType(MIME) } catch (e: Exception) { last = e; break }
+            var surface: Surface? = null
             try {
                 c.configure(format(p, tier, c.codecInfo), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                surface = c.createInputSurface()
+                c.start()
                 Log.i(TAG, "encoder ${c.name} ${p.width}x${p.height}@${p.fps} ${p.bitrate}bps modo=${p.mode.wire} nível=$tier")
                 this.tier = tier
-                return c
+                return c to surface
             } catch (e: Exception) {
-                Log.w(TAG, "configure(nível=$tier) falhou: $e")
-                if (tier == 3) rejected = "tier3 ${e.javaClass.simpleName}: ${e.message}"
+                Log.w(TAG, "encoder nível=$tier falhou: $e")
+                if (rejected.isEmpty() && tier >= 2) rejected = "tier$tier ${e.javaClass.simpleName}: ${e.message}"
                 last = e
-                c.release()
+                try { c.stop() } catch (_: Exception) {}
+                try { c.release() } catch (_: Exception) {}
+                try { surface?.release() } catch (_: Exception) {}
             }
         }
         throw last ?: IllegalStateException("sem encoder H.264")

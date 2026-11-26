@@ -18,6 +18,7 @@ import {
   PulseDetector,
   flashRegion,
   matchPulses,
+  meanChromaRGBA,
   meanLumaRGBA,
   summarizeFlash,
 } from "./flashProbe.ts";
@@ -67,6 +68,9 @@ const VSTAT_FRESH_MS = 3500;
 const FLASH_TIMEOUT_MS = 7000;
 /** Depois do `end` do app, espera os últimos quadros decodificados antes de fechar a conta. */
 const FLASH_TAIL_MS = 400;
+/** Contrapressão: tantos reinícios do decoder nesta janela (ms) relaxam a Baixa latência para o limite da 0.3.3. */
+const BP_ESCALATE_RESETS = 3;
+const BP_ESCALATE_WINDOW_MS = 10_000;
 
 const FATAL: Record<string, string> = {
   PIN_INVALID: "PIN errado. Confira o PIN mostrado no app (\"PIN do modo USB\") e conecte de novo.",
@@ -122,6 +126,9 @@ export class UsbSession {
   private decFellBack = false;
   private bpAt = 0;
   private bpDecodedAt = -1;
+  /** Instantes dos últimos reinícios por contrapressão (escalada) e se a Baixa latência foi relaxada para o limite antigo. */
+  private bpTimes: number[] = [];
+  private bpRelaxed = false;
   private microQueued = false;
 
   private canvas: HTMLCanvasElement | null = null;
@@ -140,7 +147,7 @@ export class UsbSession {
   readonly stats = {
     received: 0, decoded: 0, drawn: 0, dropped: 0, skipped: 0, keyRequests: 0, connects: 0, writes: 0, frames: 0, droppedMoves: 0,
     /** Contrapressão: descartes e reinícios do decoder; desenhos feitos no callback output (sem rAF) e no rAF. */
-    bpResets: 0, directDraws: 0, rafDraws: 0,
+    bpResets: 0, directDraws: 0, rafDraws: 0, bpRelaxed: 0,
   };
 
   /** Canal confiável e ordenado (TCP pelo ADB): a entrada dispensa redundância/keepalive/deadman. */
@@ -173,7 +180,8 @@ export class UsbSession {
     this.offAt = now;
     // Idade/chegada só fazem sentido com o offset E com o relógio do PTS confirmado pelo app (vstat.clk != "unk").
     const v = this.vstat;
-    this.offCache = !v || now - this.vstatAt > VSTAT_FRESH_MS || v.clk === "unk" || v.enc === null ? null : (this.clock?.()?.offsetMs ?? null);
+    // (Só `clk`: um vstat sem quadros no intervalo tem `enc` nulo mas a base continua confirmada.)
+    this.offCache = !v || now - this.vstatAt > VSTAT_FRESH_MS || v.clk === "unk" ? null : (this.clock?.()?.offsetMs ?? null);
     return this.offCache;
   }
 
@@ -468,6 +476,8 @@ export class UsbSession {
     };
     this.decoderConfig = cfg;
     this.metrics.onDecoderReset();
+    this.bpTimes = [];
+    this.bpRelaxed = false;
     const d = new VideoDecoder({
       output: (frame) => this.onDecoded(d, frame),
       error: (e) => this.onDecodeError(d, e),
@@ -504,7 +514,7 @@ export class UsbSession {
         this.requestKeyFrame();
         return;
       }
-      const cfg = this.videoMode === "lowlat" ? BACKPRESSURE_LOWLAT : BACKPRESSURE_LEGACY;
+      const cfg = this.videoMode === "lowlat" && !this.bpRelaxed ? BACKPRESSURE_LOWLAT : BACKPRESSURE_LEGACY;
       const progressed = this.stats.decoded > this.bpDecodedAt || now - this.bpAt > BACKPRESSURE_GRACE_MS;
       if (shouldDropForBackpressure(d.decodeQueueSize, this.metrics.oldestPendingWaitMs(now), cfg, progressed)) {
         // Decodificador atrasado: joga fora o que está na fila e espera um quadro-chave novo. Contado: a fila nunca
@@ -515,8 +525,23 @@ export class UsbSession {
         this.metrics.backpressureResets++;
         this.bpAt = now;
         this.bpDecodedAt = this.stats.decoded;
-        d.reset();
-        d.configure(this.decoderConfig!);
+        // Escalada: se o decodificador não acompanha nem depois de reinícios seguidos (ex.: decodificação por software
+        // mais lenta que o fps), reiniciar só congela a imagem esperando keyframes. Depois de BP_ESCALATE_RESETS em
+        // BP_ESCALATE_WINDOW_MS, a contrapressão volta ao limite da 0.3.3 até o próximo INFO (decoder novo).
+        this.bpTimes = this.bpTimes.filter((t) => now - t < BP_ESCALATE_WINDOW_MS);
+        this.bpTimes.push(now);
+        if (!this.bpRelaxed && this.videoMode === "lowlat" && this.bpTimes.length >= BP_ESCALATE_RESETS) {
+          this.bpRelaxed = true;
+          this.stats.bpRelaxed++;
+          this.note("O decodificador do navegador não acompanha o vídeo: descartes da Baixa latência suspensos (limite da 0.3.3) até a próxima reconfiguração");
+        }
+        try {
+          d.reset();
+          d.configure(this.decoderConfig!);
+        } catch (e) {
+          this.onDecodeError(d, e);
+          return;
+        }
         this.metrics.onDecoderReset();
         this.waitingKey = true;
         this.requestKeyFrame();
@@ -648,7 +673,9 @@ export class UsbSession {
       this.vstat = m;
       this.vstatAt = performance.now();
     } else if (m.type === "flashAck" && this.flash) {
-      if (m.end) setTimeout(() => this.finishFlash(), FLASH_TAIL_MS);
+      const fl = this.flash;
+      // o `end` fecha ESTE teste (um teste novo começado nesses 400 ms não é encerrado por ele)
+      if (m.end) setTimeout(() => this.flash === fl && this.finishFlash(), FLASH_TAIL_MS);
       else this.flash.acks.push({ n: m.n, pm: m.pm });
     } else if (m.type === "status" && m.scope === "flash" && !m.ok) {
       this.finishFlash(m.text);
@@ -689,10 +716,13 @@ export class UsbSession {
     } else if (!clk) {
       res = { ok: false, error: "Sem sincronismo de relógio ao fechar a conta.", latencies: [], median: 0, min: 0, max: 0, n: 0, pulses: fl.pulses, uncertaintyMs: 0, offsetMs: null, at: Date.now() };
     } else {
-      const { pairs } = matchPulses(fl.detector.edges, fl.acks, clk.offsetMs);
+      const det = fl.detector;
+      const { pairs, rejected } = matchPulses(det.edges, fl.acks, clk.offsetMs, 20, 2000, { highMs: det.highMs, edgePts: det.edgePts });
       res = summarizeFlash(pairs, fl.acks.length, clk.uncertaintyMs, clk.offsetMs, Date.now());
+      res.rejectedEdges = rejected;
       if (!res.ok) {
-        res.error = `Só ${pairs.length} de ${fl.acks.length} pulsos apareceram no vídeo (luminância do canto: ${Math.round(fl.detector.minLuma)}–${Math.round(fl.detector.maxLuma)}). O quadrado branco pode não estar entrando na captura de tela.`;
+        const shape = rejected || res.outliers ? ` ${rejected + (res.outliers ?? 0)} piscada(s) no canto que não tinham o formato/tempo do quadrado de teste foram ignoradas.` : "";
+        res.error = `Só ${res.n} de ${fl.acks.length} pulsos apareceram no vídeo (luminância do canto: ${Math.round(det.minLuma)}–${Math.round(det.maxLuma)}).${shape} O quadrado branco pode não estar entrando na captura de tela.`;
       }
     }
     this.lastFlash = res;
@@ -711,7 +741,8 @@ export class UsbSession {
       const g = this.sampleCtx;
       const r = flashRegion(f.displayWidth, f.displayHeight);
       g.drawImage(f, r.x, r.y, r.w, r.h, 0, 0, 8, 8);
-      fl.detector.push(tDraw, meanLumaRGBA(g.getImageData(0, 0, 8, 8).data));
+      const px = g.getImageData(0, 0, 8, 8).data;
+      fl.detector.push(tDraw, meanLumaRGBA(px), f.timestamp, meanChromaRGBA(px));
     } catch {
       // sem amostra neste quadro (ex.: quadro já fechado): o teste termina por tempo
     }

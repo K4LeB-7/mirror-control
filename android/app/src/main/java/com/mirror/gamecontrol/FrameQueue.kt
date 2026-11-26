@@ -16,8 +16,12 @@ import kotlin.concurrent.withLock
  *   [offer] devolve true: quem chamou deve pedir um IDR ao encoder.
  */
 class FrameQueue(maxFrames: Int = 8, maxBytes: Int = 4 * 1024 * 1024) {
-    /** [tNs] = System.nanoTime() da oferta (0 = não medido): a thread de escrita calcula a espera na fila (vstat `q`). */
-    class Item(val type: Int, val bytes: ByteArray, val tNs: Long = 0L)
+    /**
+     * [tNs] = System.nanoTime() da oferta (0 = não medido): a thread de escrita calcula a espera na fila (vstat `q`).
+     * [late] (app 0.3.4, só para CTRL): o quadro é MONTADO pela thread de escrita no instante em que vai para o socket
+     * (o pong carimba ali o relógio do celular, fora da espera atrás dos quadros de vídeo); nesse caso [bytes] é vazio.
+     */
+    class Item(val type: Int, val bytes: ByteArray, val tNs: Long = 0L, val late: (() -> ByteArray)? = null)
 
     /**
      * Política de latência (app 0.3.4): os limites podem mudar com o perfil de vídeo ([VideoTuning]). Em baixa latência

@@ -107,11 +107,11 @@ class UsbStreamServer(
         }
 
         override fun onFrame(key: Boolean, ptsUs: Long, data: java.nio.ByteBuffer) {
-            // Instante em que o quadro codificado saiu do MediaCodec: enc = agora − pts (captura + codificação).
-            val nowUs = ptsClock.nowUs()
+            // Instante em que o quadro codificado saiu do MediaCodec: enc = agora − pts (composição → saída do encoder).
+            // observe() confere/adota a base do relógio e devolve a idade nessa base (-1 = base não confirmada).
+            val ageUs = ptsClock.observe(ptsUs)
             val s = current ?: return
-            ptsClock.observe(ptsUs)
-            videoStats.onFrame(if (ptsClock.trusted) nowUs - ptsUs else -1, data.remaining(), key)
+            videoStats.onFrame(ageUs, data.remaining(), key)
             if (synchronized(videoLock) { infoPending }) {
                 // Encoder que só manda SPS/PPS dentro do IDR (sem csd): extrai daqui para gerar INFO + CONFIG.
                 val cfg = if (key) UsbWire.parameterSets(ByteArray(data.remaining()).also { data.duplicate().get(it) }) else null
@@ -237,11 +237,24 @@ class UsbStreamServer(
             current.also { current = session }
         }
         old?.close("REPLACED: outra aba/navegador conectou com o PIN")
+        if (old != null) {
+            FlashController.cancel() // o teste da aba antiga não continua piscando para a nova
+            flashGate.reset()
+        }
         // Navegador novo: zera gerações do injetor e anuncia a entrada v2 (o site antigo ignora o CTRL).
         GameAccessibilityService.instance?.injector?.newSession()
         session.send(UsbWire.CTRL, InputCtrl.CAPS_JSON.toByteArray(Charsets.UTF_8))
+        // Cada conexão começa no perfil LEGACY (= 0.3.3): um site antigo nunca manda `video`, e o perfil escolhido por
+        // uma aba anterior não vale para esta. Postado ANTES de iniciar a leitura: um `video` desta sessão vem depois.
+        ctl.post {
+            ctl.removeCallbacks(applyVideoMode)
+            requestedVideoMode = VideoMode.LEGACY
+            videoMode = VideoMode.LEGACY
+            session.queue.maxFrames = VideoTuning.queueFrames(VideoMode.LEGACY)
+            session.queue.maxBytes = VideoTuning.queueBytes(VideoMode.LEGACY)
+            scheduleStart(session)
+        }
         session.startThreads()
-        ctl.post { scheduleStart(session) }
     }
 
     // ------------------------------------------------------------------ encoder (thread usb-ctl)
@@ -279,7 +292,7 @@ class UsbStreamServer(
         }
         val p = computeParams()
         videoStats.reset()
-        ptsClock.reset()
+        // ptsClock NÃO é zerado: a base do PTS é do aparelho (ver PtsClock); zerar misturaria bases no `pm` do pong.
         ctl.removeCallbacks(vstatTick)
         try {
             encoder.start(p)
@@ -294,7 +307,10 @@ class UsbStreamServer(
         val msg = try { JSONObject(json) } catch (_: Exception) { return }
         // input (deadman/perfil) e ping: a resposta entra na fila de saída como qualquer CTRL (atrás de quadros de
         // vídeo já enfileirados; ver "ping/pong" em docs/USB_PROTOCOLO.md)
-        if (InputCtrl.handle(msg, receivedNs, ptsClock) { reply -> if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8)) }) return
+        // O ping é respondido com um pong montado pela thread de escrita (pm/pq carimbados na hora de ir ao socket).
+        if (InputCtrl.handle(msg, receivedNs, ptsClock, { build -> if (current === from) from.sendLate { build().toByteArray(Charsets.UTF_8) } }) { reply ->
+                if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8))
+            }) return
         when (msg.optString("type")) {
             // rotate / nav (app 0.3.0+). Girar dispara onDisplayChanged → encoder reinicia → INFO+CONFIG+KEY novos.
             "rotate", "nav" -> {
@@ -314,22 +330,37 @@ class UsbStreamServer(
                     if (pendingStart == null && encoder.isRunning) restartEncoder()
                 }
             }
-            "keyframe" -> encoder.requestKeyFrame()
-            // Perfil de vídeo (0.3.4): reconfigura o encoder na MESMA conexão (INFO+CONFIG+KEY novos).
+            // Limite de taxa (0.3.4): o site pede no máximo 1 a cada 500 ms; spam não vira rajada de IDRs no encoder.
+            "keyframe" -> if (keyGate.tryAcquire()) encoder.requestKeyFrame()
+            // Perfil de vídeo (0.3.4): reconfigura o encoder na MESMA conexão (INFO+CONFIG+KEY novos). Trocas rápidas
+            // são agrupadas (só a última vale, [VIDEO_DEBOUNCE_MS] depois da última): no máximo um reinício por rajada.
             "video" -> {
                 val m = VideoMode.fromWire(msg.optString("mode")) ?: return
                 ctl.post {
-                    if (m == videoMode) return@post
-                    videoMode = m
-                    current?.queue?.let { it.maxFrames = VideoTuning.queueFrames(m); it.maxBytes = VideoTuning.queueBytes(m) }
-                    if (pendingStart == null && encoder.isRunning) restartEncoder()
+                    requestedVideoMode = m
+                    ctl.removeCallbacks(applyVideoMode)
+                    // Antes do 1º início (logo após o HELLO) aplica já: o início agendado usa o modo novo.
+                    if (pendingStart != null || !encoder.isRunning) applyVideoMode.run()
+                    else ctl.postDelayed(applyVideoMode, VIDEO_DEBOUNCE_MS)
                 }
             }
             // Teste de latência do vídeo (0.3.4): quadrado branco/preto por overlay de acessibilidade + flashAck.
-            "flash" -> FlashController.start(ctx, ptsClock) { reply ->
+            // Um teste por vez (o plano dura ~3,5 s); pedidos durante um teste são ignorados.
+            "flash" -> if (flashGate.tryAcquire()) FlashController.start(ctx, ptsClock) { reply ->
                 if (current === from) from.send(UsbWire.CTRL, reply.toByteArray(Charsets.UTF_8))
             }
         }
+    }
+
+    @Volatile private var requestedVideoMode = VideoMode.LEGACY
+    private val keyGate = RateGate(100)
+    private val flashGate = RateGate(FlashPlan().totalMs + 700)
+    private val applyVideoMode = Runnable {
+        val m = requestedVideoMode
+        if (m == videoMode) return@Runnable
+        videoMode = m
+        current?.queue?.let { it.maxFrames = VideoTuning.queueFrames(m); it.maxBytes = VideoTuning.queueBytes(m) }
+        if (pendingStart == null && encoder.isRunning) restartEncoder()
     }
 
     private fun onSessionGone() {
@@ -338,7 +369,9 @@ class UsbStreamServer(
             pendingStart?.let { ctl.removeCallbacks(it) }
             pendingStart = null
             ctl.removeCallbacks(vstatTick)
+            ctl.removeCallbacks(applyVideoMode)
             FlashController.cancel()
+            flashGate.reset()
             encoder.stop()
             if (!stopped) status("navegador desconectado; aguardando nova conexão")
         }
@@ -358,6 +391,11 @@ class UsbStreamServer(
 
         fun send(type: Int, payload: ByteArray) {
             queue.offer(FrameQueue.Item(type, UsbWire.encode(type, payload)))
+        }
+
+        /** CTRL montado pela thread de escrita no instante de ir para o socket (pong com pm/pq). */
+        fun sendLate(build: () -> ByteArray) {
+            queue.offer(FrameQueue.Item(UsbWire.CTRL, EMPTY, 0L) { UsbWire.encode(UsbWire.CTRL, build()) })
         }
 
         fun startThreads() {
@@ -412,6 +450,14 @@ class UsbStreamServer(
                     // Um quadro = um byte[] (cabeçalho+pts+payload montados juntos): a escrita nunca divide o quadro
                     // do protocolo em dois write() do app; o flush só espera a fila esvaziar (TCP_NODELAY no socket).
                     if (item.tNs != 0L) videoStats.onQueueWaitUs((t0 - item.tNs) / 1000)
+                    val late = item.late
+                    if (late != null) {
+                        // pong: esvazia o que já está no buffer, carimba o relógio e manda sozinho (pm = ida ao socket)
+                        out.flush()
+                        out.write(late())
+                        out.flush()
+                        continue
+                    }
                     out.write(item.bytes)
                     if (queue.size == 0) {
                         out.flush()
@@ -452,6 +498,8 @@ class UsbStreamServer(
 
     private companion object {
         const val TAG = "UsbStreamServer"
+        const val VIDEO_DEBOUNCE_MS = 250L
+        val EMPTY = ByteArray(0)
         fun closeQuietly(s: Socket) {
             try { s.close() } catch (_: IOException) {}
         }

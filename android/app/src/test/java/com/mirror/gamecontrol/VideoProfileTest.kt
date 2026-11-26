@@ -237,4 +237,72 @@ class VideoProfileTest {
         assertEquals(0L, FrameQueue.Item(UsbWire.CTRL, ByteArray(1)).tNs)
         assertNotNull(q)
     }
+
+    // ------------------------------------------------------------------ revisão 0.3.4
+    @Test fun clockObserveReturnsAgeAndIsNotForgottenByEncoderRestarts() {
+        val k = Clk(mono = 10_000_000, boot = 90_000_000)
+        assertEquals(-1L, k.c.trustedNowUs()) // sem base confirmada: pong/flashAck sem pm
+        assertEquals(12_000L, k.c.observe(9_988_000))
+        assertEquals(10_000_000L, k.c.trustedNowUs())
+        // o encoder reinicia (girar/perfil): o servidor NÃO zera mais o relógio; quadros do encoder novo continuam na base
+        k.mono += 500_000; k.boot += 500_000
+        assertEquals(8_000L, k.c.observe(10_492_000))
+        assertEquals(PtsClock.Base.MONO, k.c.base)
+    }
+
+    @Test fun clockPrefersMonotonicWhenBothBasesArePlausible() {
+        // aparelho que quase não dormiu desde o boot: boot − mono = 2 s → as duas bases "plausíveis"; vale a do AOSP
+        val k = Clk(mono = 100_000_000, boot = 102_000_000)
+        assertEquals(10_000L, k.c.observe(99_990_000))
+        assertEquals(PtsClock.Base.MONO, k.c.base)
+    }
+
+    @Test fun clockDropsTheBaseAfterManyConsecutiveImplausibleFrames() {
+        val k = Clk(mono = 10_000_000, boot = 90_000_000)
+        k.c.observe(9_990_000)
+        repeat(PtsClock.MAX_VIOLATIONS - 1) { assertEquals(-1L, k.c.observe(0)) }
+        assertTrue("um punhado de quadros estranhos não derruba a base", k.c.trusted)
+        assertEquals(10_000L, k.c.observe(9_990_000)) // um quadro bom zera a contagem
+        repeat(PtsClock.MAX_VIOLATIONS) { k.c.observe(0) } // encoder passou a normalizar o PTS
+        assertFalse(k.c.trusted)
+        assertEquals(-1L, k.c.trustedNowUs())
+    }
+
+    @Test fun pongCarriesQueueHoldTimeOnlyWithClock() {
+        assertEquals("{\"type\":\"pong\",\"t\":1.000,\"p\":40,\"d\":-1.0,\"profile\":\"balanced\",\"pm\":5000,\"pq\":2500}",
+            InputCtrl.pong(1.0, 40, -1.0, FluidityProfile.BALANCED, 5000, 2500))
+        // sem relógio confirmado: nem pm nem pq (idêntico à 0.3.3)
+        assertEquals("{\"type\":\"pong\",\"t\":1.000,\"p\":40,\"d\":-1.0,\"profile\":\"balanced\"}",
+            InputCtrl.pong(1.0, 40, -1.0, FluidityProfile.BALANCED, -1, 2500))
+    }
+
+    @Test fun rateGateLimitsSpam() {
+        var now = 1_000L
+        val g = RateGate(100) { now }
+        assertTrue(g.tryAcquire())
+        assertFalse(g.tryAcquire())
+        now += 99; assertFalse(g.tryAcquire())
+        now += 1; assertTrue(g.tryAcquire())
+        var accepted = 0
+        repeat(1000) { now += 1; if (g.tryAcquire()) accepted++ } // 1000 pedidos em 1 s → 10 aceitos
+        assertEquals(10, accepted)
+        g.reset(); assertTrue(g.tryAcquire())
+        // flash: um teste por vez (o plano dura ~3,5 s)
+        assertTrue(FlashPlan().totalMs + 700 >= 3_500)
+    }
+
+    @Test fun lateCtrlIsBuiltByTheWriterAndNeverDropped() {
+        val q = FrameQueue(VideoTuning.queueFrames(VideoMode.LOWLAT), VideoTuning.queueBytes(VideoMode.LOWLAT))
+        var built = 0
+        q.offer(key())
+        repeat(3) { q.offer(delta()) }
+        q.offer(FrameQueue.Item(UsbWire.CTRL, ByteArray(0), 0L) { built++; byteArrayOf(1, 2, 3) })
+        assertTrue(q.offer(delta())) // estouro: descarta deltas, nunca o CTRL
+        assertEquals(listOf(UsbWire.VIDEO_KEY, UsbWire.CTRL), q.types())
+        assertEquals(0, built) // só monta quando a thread de escrita o pegar
+        q.take(0)
+        val late = q.take(0)!!
+        assertEquals(listOf<Byte>(1, 2, 3), late.late!!().toList())
+        assertEquals(1, built)
+    }
 }

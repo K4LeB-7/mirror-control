@@ -40,7 +40,7 @@ Um `len` fora do limite é erro de protocolo: o receptor fecha a conexão (não 
 4. **INPUT** → `TouchInjector`. **CTRL**:
    - `{"type":"quality","height":720|1080,"fps":30|60}` → reinicia o encoder (só se mudou);
    - `{"type":"keyframe"}` → pede um IDR (`PARAMETER_KEY_REQUEST_SYNC_FRAME`); o navegador manda quando o decodificador
-     falhou ou descartou quadros;
+     falhou ou descartou quadros (no máximo 1 a cada 500 ms); o app 0.3.4+ atende no máximo 1 a cada 100 ms;
    - `{"type":"rotate","mode":"portrait"|"landscape"|"auto"}` (app 0.3.0+) → gira a tela (`RotationController`). Se o
      tamanho do vídeo mudar, o encoder reinicia e o celular manda **INFO + VIDEO_CONFIG + VIDEO_KEY** novos na MESMA
      conexão (o navegador reconfigura o decodificador e o `<canvas>` e troca o layout retrato/paisagem). Resposta
@@ -54,8 +54,11 @@ Um `len` fora do limite é erro de protocolo: o receptor fecha a conexão (não 
    - `{"type":"ping","t":T}` (site 0.3.3+, ~1/s enquanto conectado) → o app 0.3.3+ responde NA HORA
      `{"type":"pong","t":T,"p":µs,"d":ms,"profile":"…"}` (ver "Ping/pong"). App antigo ignora (o site mostra "—").
    - `{"type":"video","mode":"lowlat"|"legacy"}` (site/app 0.3.4+) → perfil de vídeo (ver "Latência do vídeo (0.3.4)");
-     o app reconfigura o encoder na mesma conexão (INFO+CONFIG+KEY novos). App/site antigos ignoram em silêncio.
-   - `{"type":"flash"}` (site/app 0.3.4+) → teste de latência do vídeo (ver "Latência do vídeo (0.3.4)").
+     o app reconfigura o encoder na mesma conexão (INFO+CONFIG+KEY novos). Trocas em rajada são agrupadas (vale a
+     última, 250 ms depois dela). Cada conexão começa em `legacy`. Valores desconhecidos são ignorados. App/site
+     antigos ignoram em silêncio.
+   - `{"type":"flash"}` (site/app 0.3.4+) → teste de latência do vídeo (ver "Latência do vídeo (0.3.4)"). Um teste por
+     vez (pedidos durante um teste, ~4 s, são ignorados).
 
    **CTRL celular → navegador** (app 0.3.0+): `{"type":"status","scope":"rotate"|"nav","ok":true|false,"text":"…"}`,
    texto em português para mostrar na barra do site. Os mesmos JSON `rotate`/`nav`/`status` passam pelo DataChannel
@@ -137,8 +140,8 @@ O pacote de 18 bytes e as regras de geração NÃO mudam. Medições ANTES × DE
   espera do OKAY antes do próximo — com a cadeia de 0.3.2 os pacotes faziam fila atrás dessas esperas.
 - **Ping/pong** (site e app 0.3.3): o site manda `{"type":"ping","t":performance.now()}` a cada 1 s pelo canal de
   controle (USB: CTRL no mesmo socket; WebRTC: canal `ctrl`); o app responde na thread que leu a mensagem
-  `{"type":"pong","t":<o mesmo>,"p":<µs entre receber o ping e mandar o pong>,"d":<mediana DOWN→dispatchGesture medida
-  no celular, ms, -1 = sem dados>,"profile":"…","pm":<relógio monotônico do celular em µs, app 0.3.4+>}`. O site mostra na barra: RTT (mediana/p95/máx dos últimos 20),
+  `{"type":"pong","t":<o mesmo>,"p":<µs entre receber o ping e tratá-lo>,"d":<mediana DOWN→dispatchGesture medida
+  no celular, ms, -1 = sem dados>,"profile":"…"}` (+ `pm`/`pq` no USB, app 0.3.4+: ver "Relógio"). O site mostra na barra: RTT (mediana/p95/máx dos últimos 20),
   "tecla→celular ≈ RTT/2 + p" e "celular→toque" (= d). Observação: no USB o pong volta pela fila de saída do celular,
   atrás de quadros de vídeo já enfileirados, então o RTT/2 tende a SUPERestimar a ida da entrada.
 - **Perfis de fluidez** (app 0.3.3, `FluidityProfile.kt`; escolhidos na barra do site, salvos no navegador e enviados a
@@ -183,23 +186,33 @@ O pacote de 18 bytes e as regras de geração NÃO mudam. Medições ANTES × DE
   prioridade de tempo real e `low-latency` quando o aparelho aceitar.
 - O navegador usa WebCodecs `VideoDecoder` com o `codec` do INFO, sem `description` (Annex B), `optimizeForLatency`, e
   junta o último VIDEO_CONFIG na frente de cada VIDEO_KEY. Só desenha o quadro mais novo no `<canvas>`.
-- **PTS** (µs, u64): o MediaCodec com entrada por Surface usa o timestamp do buffer (BufferQueue do VirtualDisplay, ns,
-  base CLOCK_MONOTONIC = `System.nanoTime()`) dividido por 1000 — ou seja, ≈ o instante em que o SurfaceFlinger entregou
-  o quadro composto ao encoder (captura). Isso foi **lido** (docs/AOSP), não verificado em aparelho; por isso o app
-  confere em tempo de execução (`PtsClock`): compara `agora − pts` na base MONOTONIC e na BOOTTIME e adota a que dá uma
-  idade plausível (−50 ms … 5 s); se nenhuma serve, o `vstat` informa `clk:"unk"` e `enc:null` e o site não calcula idade.
-  O formato dos quadros de vídeo NÃO mudou.
+- **PTS** (µs, u64): o MediaCodec com entrada por Surface usa o timestamp do buffer que o SurfaceFlinger enfileira na
+  Surface do encoder (AOSP `VirtualDisplaySurface`: `systemTime()` = CLOCK_MONOTONIC = `System.nanoTime()`) dividido por
+  1000 — ou seja, ≈ o instante em que a composição daquele quadro ficou pronta (≈ 1 vsync depois do quadro do app).
+  Isso foi **lido** (AOSP), não verificado em aparelho; por isso o app confere em tempo de execução (`PtsClock`):
+  compara `agora − pts` na base MONOTONIC (preferida) e na BOOTTIME e adota a que dá uma idade plausível (−50 ms … 5 s).
+  A base confirmada vale para o aparelho todo (não é esquecida quando o encoder reinicia); 30 quadros SEGUIDOS fora da
+  janela a derrubam. Sem base confirmada o `vstat` informa `clk:"unk"` e `enc:null`, o pong vai sem `pm`/`pq`, o
+  `flash` responde erro, e o site não calcula idade. Quadros REPETIDOS pelo encoder (`repeat-previous-frame-after`, tela
+  parada) recebem PTS sintético (último + 150 ms): com a tela parada `enc`/idade ficam MENORES que a latência de uma
+  mudança real — meça com algo se mexendo na tela (ou use o teste de 1 clique). O formato dos quadros NÃO mudou.
 
 ## Latência do vídeo (0.3.4)
 Medir e reduzir a volta do vídeo (captura → codificação → cabo/ADB → decodificação → desenho), que a linha "Enlace"
 (só a ENTRADA) não mostra. Tudo compatível com site/app antigos: CTRL desconhecidos são ignorados.
 
-### Relógio: `pm` e offset
-O `pong` ganha `pm` = relógio do celular (µs) na MESMA base do PTS dos quadros (`PtsClock.nowUs()`). O site estima
-`offset = (t_envio + t_recv)/2 + p/2 − pm/1000` (browser = celular + offset) a cada pong e usa o de **menor RTT** dos
-últimos 20 (filtro de mínimo: pings que ficaram atrás de quadros de vídeo na fila de saída do celular, ou num engasgo do
-USB, têm RTT e assimetria maiores). Incerteza: o erro é (atraso de ida − atraso de volta)/2; no pior caso (todo o atraso
-de um lado só) ≈ (RTT_mín − p)/2, que o site expõe como `incertezaMs` no diagnóstico (com RTT ~10 ms, ±5 ms).
+### Relógio: `pm`/`pq` e offset
+No USB o pong do app 0.3.4+ é MONTADO pela thread de escrita na hora de ir para o socket (depois de esvaziar o buffer;
+sai sozinho, com flush) e ganha `pm` = relógio do celular (µs) nesse instante, na MESMA base do PTS
+(`PtsClock`), e `pq` = µs entre receber o ping e esse instante (inclui a espera na fila de saída atrás de quadros de
+vídeo). `p` mantém a semântica da 0.3.3 (receber → tratar), usada no "tecla→celular". O site estima
+`offset = (t_envio + t_recv)/2 + pq/2 − pm/1000` (browser = celular + offset; sem `pq` usa `p`) e usa a amostra de
+**menor incerteza** `(RTT − pq)/2` entre as últimas 20 com até 30 s (filtro de mínimo: pings que pegaram vídeo no cabo
+ou um engasgo do USB têm assimetria maior). A espera na fila de saída do app fica FORA da assimetria (antes, com o `pm`
+carimbado ao receber, ela enviesava o offset em ~espera/2). Incerteza: erro = (atraso de ida − atraso de volta)/2, no
+pior caso ±(RTT − pq)/2, exposto como `incertezaMs`. **Salto de relógio** (o celular dormiu: CLOCK_MONOTONIC para;
+ou a base mudou): cada amostra limita o offset real a `[off − u, off + u]`; se a nova não cruza a melhor (folga 0,5 ms +
+100 ppm de deriva), as antigas são descartadas (`relogio.saltos` no diagnóstico). WebRTC: sem `pm` (sem vídeo próprio).
 
 ### CTRL `vstat` (celular → navegador, ~1 Hz, app 0.3.4+)
 `{"type":"vstat","seq":N,"enc":{"p50":8.2,"p95":12.0,"max":20.1},"q":{…},"wr":{…},"fps":59.8,"kbps":7900,
@@ -230,10 +243,16 @@ o overlay é removido ao terminar, ao desconectar e quando o serviço de acessib
   (o SurfaceFlinger apresenta ~1 vsync depois; `vs` = período do vsync). Incerteza ≈ ±1 vsync (8 ms a 120 Hz) — NÃO
   verificado em aparelho.
 - No site (`UsbSession.startFlashTest`): a cada quadro DESENHADO durante o teste, amostra-se o miolo (20–80 %) do quadrado
-  (coordenadas do vídeo; `drawImage` do `VideoFrame` numa canvas 8×8 + `getImageData`, ~1 ms) e a luminância (Rec. 709)
-  alimenta um detector de borda de subida com histerese (<64 → >160). `latência(n) = t_desenho_da_borda − (pm_n/1000 +
-  offset)`; o resultado mostra mediana/mín/máx dos pulsos. Inclui captura (até 1 vsync) + codificação + cabo/fila +
-  decodificação + espera de desenho; NÃO inclui compositor do Chrome e o monitor (≈ 1 quadro do monitor).
+  (coordenadas do vídeo; `drawImage` do `VideoFrame` numa canvas 8×8 + `getImageData`, ~10 µs–1 ms) e a luminância (Rec. 709)
+  alimenta um detector de borda de subida com histerese (<64 → >160). Robustez (o quadrado é preto/BRANCO e o pulso dura
+  300 ms): amostra colorida (croma média > 48) não é o quadrado; "pulso" com claro < 120 ms ou > 700 ms é ignorado; pares
+  a mais de 50 ms da mediana são descartados como incoerentes e o resultado só vale com ≥ 2 pulsos coerentes e ≥ 60 %
+  dos pares. Assim, se o overlay não entrar na captura e o conteúdo piscar no canto, o teste diz "Só N de 5" em vez de
+  inventar um número. `latência(n) = t_desenho_da_borda − (pm_n/1000 + offset)`; o resultado mostra mediana/mín/máx.
+  Inclui captura + codificação + cabo/fila + decodificação + espera de desenho; NÃO inclui compositor do Chrome e o
+  monitor (≈ 1 quadro do monitor). O detalhe mostra também **captura − apresentação estimada** = PTS do 1º quadro com o
+  pulso − `pm` (os dois no relógio do celular, SEM offset): ≈ 0 a 1 vsync se o `pm` estiver certo; muito diferente disso
+  indica que a estimativa do `pm` (ou a base do relógio) está errada no aparelho.
 
 ### CTRL `video` (perfil) e o que muda em cada perfil
 `{"type":"video","mode":"lowlat"|"legacy"}`. O site novo manda a cada (re)conexão (padrão "Baixa latência", escolha salva
@@ -246,7 +265,7 @@ no navegador); sem o CTRL (site ≤ 0.3.3) o app fica em `legacy` = comportament
 | Bitrate (CBR) | 8 Mbps em 720p60 / 16 Mbps em 1080p60 (proporcional ao fps) | 75 % disso (6 / 12 Mbps) |
 | Fila de saída do app | 8 quadros / 4 MiB | 4 quadros / 2 MiB (descarta deltas + pede IDR em vez de acumular) |
 | Navegador: desenho | `requestAnimationFrame` (um por quadro do monitor) | direto no microtask do callback `output` do decoder (só o último se vários no mesmo tick; `desynchronized`) |
-| Navegador: contrapressão | `decodeQueueSize > 6` | `> 2` E o quadro mais velho esperando ≥ 24 ms (ou `> 6`); sem progresso desde o último descarte só reinicia com fila > 12 |
+| Navegador: contrapressão | `decodeQueueSize > 6` | `> 2` E o quadro mais velho esperando ≥ 24 ms (ou `> 6`); sem progresso desde o último descarte só reinicia com fila > 12; 3 reinícios em 10 s (decodificador com latência fixa/lento) relaxam para o limite da 0.3.3 até o próximo INFO (`stats.bpRelaxed`) |
 
 Resolução/fps continuam os escolhidos no site (720p60 já é o padrão). No site, o perfil também vale com app antigo (o
 lado do navegador independe do app).
@@ -261,7 +280,11 @@ O transporte direto (`AdbDaemonTransport`) anuncia `delayed_ack` com janela inic
 celular também o anunciar; Android 14+ costuma anunciar — o diagnóstico copiável mostra `adb.delayedAck`) e payload
 máximo de 1 MiB (negociado com o `CNXN` do adbd: `adb.maxPayloadSize`). Sem delayed ack cada WRTE espera o OKAY. Nada a
 configurar: já é o padrão da biblioteca. O laço de leitura do site (`reader.read()` → `FrameDecoder`) usa vistas sem cópia
-(`zeroCopy`) quando o pedaço começa num limite de quadro.
+(`zeroCopy`) quando o pedaço começa num limite de quadro. É seguro: cada pedaço do Tango é o `payload` de um pacote
+WRTE, e cada payload é um `ArrayBuffer` NOVO de um `transferIn` do WebUSB (`adb-daemon-webusb`: `new Uint8Array(
+result.data.buffer)`), nunca reaproveitado; `EncodedVideoChunk` copia os dados e o VIDEO_CONFIG é copiado (`slice`).
+O dispatcher não espera a leitura de um socket para tratar os outros e, com delayed ack, o adbd pode mandar até 32 MiB
+sem esperar o OKAY: o laço `await reader.read()` do site não segura o celular.
 
 O celular monta cada VIDEO_KEY/VIDEO_DELTA direto do buffer de saída do MediaCodec (uma cópia por quadro, app 0.3.1).
 

@@ -44,7 +44,7 @@ Site: https://mirror-control.vercel.app
    **Diagnóstico de toque**. Medições (modelo do AOSP e navegador) em
    [docs/INSTALAR_APK.md](docs/INSTALAR_APK.md#fluidez-e-latência-033-perfis-e-como-comparar-no-aparelho).
 
-7. **Latência do vídeo (site e app 0.3.4, modo USB)**: instrumentação ponta a ponta (PTS = captura, offset de relógio por
+7. **Latência do vídeo (site e app 0.3.4, modo USB)**: instrumentação ponta a ponta (PTS ≈ instante da composição capturada, offset de relógio por
    ping/pong, `vstat` do encoder, idade do quadro no desenho), botão **Medir latência do vídeo** (quadrado branco/preto no
    canto da tela pelo serviço de acessibilidade, detectado nos quadros decodificados), **Copiar diagnóstico**, e o
    perfil de vídeo **Baixa latência** (padrão) × **Padrão (0.3.3)** para comparar no aparelho. Guia em

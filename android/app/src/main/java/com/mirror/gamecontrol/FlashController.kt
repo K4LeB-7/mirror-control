@@ -46,6 +46,12 @@ object FlashController {
 
     private fun startOnMain(ctx: Context, clock: PtsClock, plan: FlashPlan, reply: (String) -> Unit) {
         cancelOnMain()
+        if (!clock.trusted) {
+            // Sem a base do PTS confirmada o `pm` não seria comparável com o vídeo: não mede (o site explica).
+            reply(FlashPlan.failJson("O relógio do vídeo ainda não foi confirmado no celular (o encoder precisa entregar quadros). Tente de novo em alguns segundos."))
+            reply(FlashPlan.endJson(0))
+            return
+        }
         val svc = GameAccessibilityService.instance
         if (svc == null) {
             reply(FlashPlan.failJson("Para medir a latência do vídeo, ative o serviço de acessibilidade do Mirror Control (é ele quem desenha o quadrado de teste)."))
@@ -94,6 +100,8 @@ object FlashController {
                 if (st.white) {
                     Choreographer.getInstance().postFrameCallback { frameTimeNanos ->
                         if (gen != myGen) return@postFrameCallback
+                        // Base do PTS perdida no meio do teste (não deveria): sem ack, o site conta o pulso como faltando.
+                        if (!clock.trusted) return@postFrameCallback
                         val pm0 = clock.fromMono(frameTimeNanos / 1000)
                         reply(FlashPlan.ackJson(st.n, pm0 + PRESENT_DELAY_VSYNCS * vsyncUs, pm0, vsyncUs))
                     }

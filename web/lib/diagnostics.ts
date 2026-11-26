@@ -79,14 +79,14 @@ export function buildDiagnostics(i: DiagInput) {
       sessao: i.session,
     },
     relogio: i.clock
-      ? { offsetMs: r1(i.clock.offsetMs), incertezaMs: r1(i.clock.uncertaintyMs), rttMinMs: r1(i.clock.rttMs), amostras: i.clock.n }
+      ? { offsetMs: r1(i.clock.offsetMs), incertezaMs: r1(i.clock.uncertaintyMs), rttMinMs: r1(i.clock.rttMs), amostras: i.clock.n, saltos: i.clock.jumps ?? 0 }
       : null,
     entrada: i.link
       ? { rttMs: { p50: r1(i.link.rttP50), p95: r1(i.link.rttP95), max: r1(i.link.rttMax) }, teclaParaCelularMs: r1(i.link.keyToPhoneMs), celularParaToqueMs: i.link.phoneDispatchMs >= 0 ? r1(i.link.phoneDispatchMs) : null, appMs: r1(i.link.appMs), amostras: i.link.n }
       : null,
     fluidez: { site: i.fluidity, celular: i.phoneFluidity },
     testeFlash: f
-      ? { ok: f.ok, erro: f.error ?? null, medianaMs: r1(f.median), minMs: r1(f.min), maxMs: r1(f.max), pulsosMedidos: f.n, pulsosPedidos: f.pulses, porPulsoMs: f.latencies.map((x) => r1(x)), incertezaRelogioMs: r1(f.uncertaintyMs), quando: new Date(f.at).toISOString() }
+      ? { ok: f.ok, erro: f.error ?? null, medianaMs: r1(f.median), minMs: r1(f.min), maxMs: r1(f.max), pulsosMedidos: f.n, pulsosPedidos: f.pulses, porPulsoMs: f.latencies.map((x) => r1(x)), incertezaRelogioMs: r1(f.uncertaintyMs), capturaMenosApresentacaoMs: r1(f.captureLagMs ?? null), bordasIgnoradas: f.rejectedEdges ?? 0, pulsosIncoerentes: f.outliers ?? 0, quando: new Date(f.at).toISOString() }
       : null,
     adb: i.adb,
   };

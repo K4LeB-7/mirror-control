@@ -42,20 +42,29 @@ object VideoTuning {
 }
 
 /**
- * Relógio do PTS (µs). O PTS dos quadros de uma entrada por Surface é o timestamp do buffer (BufferQueue do
- * VirtualDisplay), em ns, na base CLOCK_MONOTONIC do sistema (a mesma de `System.nanoTime()`); o MediaCodec o entrega
- * em µs. Isso NÃO foi verificado em aparelho (só lido na documentação/AOSP), então o app confere em tempo de execução:
- * para cada quadro compara `agora − pts` na base MONOTONIC e na BOOTTIME (`elapsedRealtimeNanos`) e adota a base em
- * que a diferença é plausível ([-PLAUSIBLE_MIN_US, PLAUSIBLE_MAX_US]). Se nenhuma serve (ex.: encoder normalizou o PTS
- * para começar em 0), [trusted] fica falso e o app NÃO reporta "enc" nem usa o PTS como captura. O mesmo relógio é
- * usado no `pm` do pong e do flashAck, para o site converter tudo com um único offset.
+ * Relógio do PTS (µs). Para entrada por Surface alimentada por VirtualDisplay, o PTS é o timestamp do buffer que o
+ * SurfaceFlinger enfileira na Surface do encoder (AOSP: VirtualDisplaySurface usa `systemTime()` = CLOCK_MONOTONIC,
+ * a base de `System.nanoTime()`), ou seja, o instante em que a composição daquele quadro foi entregue; o MediaCodec o
+ * devolve em µs. Isso NÃO foi verificado em aparelho, então o app confere em tempo de execução: compara `agora − pts`
+ * na base MONOTONIC e na BOOTTIME (`elapsedRealtimeNanos`) e adota a base em que a diferença é plausível
+ * ([-PLAUSIBLE_MIN_US, PLAUSIBLE_MAX_US]); MONOTONIC tem preferência (é a esperada pelo código do AOSP).
+ *
+ * Regras (revisão 0.3.4):
+ * - A base confirmada é uma propriedade do aparelho, não do encoder: ela NÃO é esquecida quando o encoder reinicia
+ *   (girar, trocar perfil/qualidade). Antes, cada reinício voltava a "desconhecida" e, nesse intervalo, o `pm` do pong
+ *   saía em outra base, misturando bases na janela do site.
+ * - Sem base confirmada ([trusted] falso) o app NÃO manda `pm` (pong/flashAck) nem `enc`: o site mostra "—".
+ * - Depois de confirmada, cada quadro continua sendo conferido; [MAX_VIOLATIONS] quadros SEGUIDOS fora da janela
+ *   (encoder que passou a normalizar o PTS, base que mudou) derrubam a confirmação até um quadro plausível de novo.
+ * - Dormir/acordar: CLOCK_MONOTONIC para durante o suspend; o site detecta o salto do offset (linkProbe.ts) e refaz
+ *   a estimativa. Como PTS e `pm` usam o MESMO relógio, a conta continua coerente.
  */
 class PtsClock(private val monoUs: () -> Long, private val bootUs: () -> Long) {
     enum class Base(val wire: String) { MONO("mono"), BOOT("boot"), UNKNOWN("unk") }
 
     @Volatile var base = Base.UNKNOWN
         private set
-    @Volatile private var locked = false
+    private var violations = 0 // só a thread do encoder escreve
 
     /** true quando a base do PTS foi confirmada (a de [nowUs]) e `agora − pts` é a idade real do quadro. */
     val trusted get() = base != Base.UNKNOWN
@@ -63,31 +72,51 @@ class PtsClock(private val monoUs: () -> Long, private val bootUs: () -> Long) {
     /** Agora na base do PTS (MONOTONIC enquanto desconhecida: é a base esperada). */
     fun nowUs(): Long = if (base == Base.BOOT) bootUs() else monoUs()
 
+    /** Agora na base do PTS, ou -1 se a base não está confirmada (o campo `pm` é omitido). */
+    fun trustedNowUs(): Long = if (trusted) nowUs() else -1
+
     /** Converte um instante MONOTONIC (ex.: Choreographer.frameTimeNanos/1000) para a base do PTS. */
     fun fromMono(tMonoUs: Long): Long = if (base == Base.BOOT) tMonoUs + (bootUs() - monoUs()) else tMonoUs
 
-    /** Chamada a cada quadro codificado (barata). Depois de confirmada a base, não reavalia. */
-    fun observe(ptsUs: Long) {
-        if (locked) return
-        val m = monoUs() - ptsUs
-        val b = bootUs() - ptsUs
-        val chosen = when {
-            plausible(m) -> Base.MONO
-            plausible(b) -> Base.BOOT
-            else -> Base.UNKNOWN
+    /**
+     * Chamada a cada quadro codificado (barata, sem alocação). Devolve a idade do quadro (`agora − pts`, µs) na base
+     * confirmada, ou -1 se a base não está confirmada.
+     */
+    fun observe(ptsUs: Long): Long {
+        val b = base
+        if (b != Base.UNKNOWN) {
+            val age = (if (b == Base.BOOT) bootUs() else monoUs()) - ptsUs
+            if (plausible(age)) {
+                violations = 0
+                return age
+            }
+            if (++violations < MAX_VIOLATIONS) return -1 // um quadro esquisito não derruba a base (nem entra no enc)
+            base = Base.UNKNOWN
+            violations = 0
         }
-        base = chosen
-        if (chosen != Base.UNKNOWN) locked = true
+        val m = monoUs() - ptsUs
+        if (plausible(m)) {
+            base = Base.MONO
+            return m
+        }
+        val bt = bootUs() - ptsUs
+        if (plausible(bt)) {
+            base = Base.BOOT
+            return bt
+        }
+        return -1
     }
 
+    /** Só para testes / fim do serviço: esquece a base. */
     fun reset() {
         base = Base.UNKNOWN
-        locked = false
+        violations = 0
     }
 
     companion object {
         const val PLAUSIBLE_MIN_US = 50_000L // um quadro não pode ser "do futuro" além de erro de relógio/arredondamento
         const val PLAUSIBLE_MAX_US = 5_000_000L
+        const val MAX_VIOLATIONS = 30
         fun plausible(ageUs: Long) = ageUs >= -PLAUSIBLE_MIN_US && ageUs <= PLAUSIBLE_MAX_US
     }
 }
@@ -226,5 +255,24 @@ data class FlashPlan(val pulses: Int = 5, val onMs: Long = 300, val offMs: Long 
 
         fun failJson(text: String): String =
             "{\"type\":\"status\",\"scope\":\"flash\",\"ok\":false,\"text\":\"${text.filter { it != '"' && it != '\\' && it >= ' ' }.take(240)}\"}"
+    }
+}
+
+/**
+ * Limite de taxa (thread-safe) para CTRLs que custam caro no app (`flash`, `keyframe`): aceita no máximo um evento a
+ * cada [minIntervalMs]; o resto é ignorado em silêncio. Assim um site com defeito (ou spam) não trava o app.
+ */
+class RateGate(private val minIntervalMs: Long, private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }) {
+    private var last = Long.MIN_VALUE / 2
+
+    @Synchronized fun tryAcquire(): Boolean {
+        val t = nowMs()
+        if (t - last < minIntervalMs) return false
+        last = t
+        return true
+    }
+
+    @Synchronized fun reset() {
+        last = Long.MIN_VALUE / 2
     }
 }

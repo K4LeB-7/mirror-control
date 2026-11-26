@@ -19,14 +19,17 @@ object InputCtrl {
 
     /**
      * Resposta ao ping: `t` = o mesmo valor do site (relógio dele), `p` = µs entre o celular receber o ping e
-     * mandar o pong, `d` = mediana DOWN→dispatchGesture medida no celular (ms; -1 sem amostras), `profile`.
-     * App 0.3.4+: `pm` = relógio monotônico do celular (µs, a base do PTS do vídeo) quando o pong é montado; o site
-     * estima o offset de relógio com ele (linkProbe.ts). Sem relógio ([pmUs] < 0) o campo é omitido.
+     * tratar a mensagem (semântica da 0.3.3, usada no "tecla→celular"), `d` = mediana DOWN→dispatchGesture medida no
+     * celular (ms; -1 sem amostras), `profile`.
+     * App 0.3.4+ (USB), só com a base do PTS confirmada: `pm` = relógio do celular (µs, a base do PTS do vídeo) no
+     * instante em que o pong vai para o socket, e `pq` = µs entre receber o ping e esse instante (inclui a espera na
+     * fila de saída atrás de quadros de vídeo). O site estima o offset de relógio com `pq` (linkProbe.ts): a espera
+     * na fila fica fora da assimetria. Sem relógio ([pmUs] < 0) os dois campos são omitidos.
      */
-    fun pong(t: Double, procUs: Long, downDispatchMs: Double, profile: FluidityProfile, pmUs: Long = -1): String =
+    fun pong(t: Double, procUs: Long, downDispatchMs: Double, profile: FluidityProfile, pmUs: Long = -1, pqUs: Long = -1): String =
         String.format(Locale.US, "{\"type\":\"pong\",\"t\":%.3f,\"p\":%d,\"d\":%.1f,\"profile\":\"%s\"%s}",
             if (t.isFinite()) t else 0.0, procUs.coerceAtLeast(0), downDispatchMs, profile.wire,
-            if (pmUs >= 0) ",\"pm\":$pmUs" else "")
+            if (pmUs >= 0) ",\"pm\":$pmUs" + (if (pqUs >= 0) ",\"pq\":$pqUs" else "") else "")
 
     fun profileStatus(p: FluidityProfile, frameMs: Int): String =
         "{\"type\":\"status\",\"scope\":\"profile\",\"ok\":true,\"profile\":\"${p.wire}\",\"frameMs\":$frameMs," +
@@ -39,13 +42,24 @@ object InputCtrl {
      * Trata "input" e "ping" (devolve false para os outros tipos). [receivedNs] = System.nanoTime() de quando o
      * quadro/mensagem chegou; [reply] manda texto de volta pelo mesmo caminho (pode ser chamado de outra thread).
      */
-    fun handle(msg: org.json.JSONObject, receivedNs: Long, clock: PtsClock? = null, reply: (String) -> Unit): Boolean {
+    fun handle(
+        msg: org.json.JSONObject, receivedNs: Long, clock: PtsClock? = null,
+        lateReply: ((build: () -> String) -> Unit)? = null, reply: (String) -> Unit,
+    ): Boolean {
         val injector = GameAccessibilityService.instance?.injector
         when (msg.optString("type")) {
             "ping" -> {
                 val t = msg.optDouble("t", 0.0)
                 val d = injector?.downDispatchP50Ms() ?: -1.0
-                reply(pong(t, (System.nanoTime() - receivedNs) / 1000, d, currentProfile, clock?.nowUs() ?: -1))
+                val procUs = (System.nanoTime() - receivedNs) / 1000
+                val prof = currentProfile
+                if (clock != null && lateReply != null) {
+                    // USB 0.3.4: o pong é montado pela thread de escrita, na hora de ir para o socket (pm/pq ali).
+                    lateReply {
+                        val pm = clock.trustedNowUs()
+                        pong(t, procUs, d, prof, pm, if (pm >= 0) (System.nanoTime() - receivedNs) / 1000 else -1)
+                    }
+                } else reply(pong(t, procUs, d, prof, clock?.trustedNowUs() ?: -1))
                 return true
             }
             "input" -> {

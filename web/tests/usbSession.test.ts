@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { UsbSession } from "../lib/usbSession.ts";
 import { Action, encodePacket } from "../lib/protocol.ts";
-import { FrameDecoder, FrameType, encodeText } from "../lib/usbWire.ts";
+import { FrameDecoder, FrameType, encodeText, encodeVideoFrame } from "../lib/usbWire.ts";
 
 type Pending = { bytes: Uint8Array; resolve: () => void };
 
@@ -201,5 +201,147 @@ test("0.3.4: fim do teste sem nenhum pulso detectado → erro explicando (o quad
   assert.equal(r.ok, false);
   assert.match(r.error!, /Só 0 de 5 pulsos apareceram no vídeo/);
   assert.equal(s.lastFlashResult, r);
+  s.close();
+});
+
+// ---------------------------------------------------------------- revisão 0.3.4: decodificador falso (WebCodecs não existe no node)
+type FakeInit = { output: (f: { timestamp: number; close: () => void; displayWidth: number; displayHeight: number }) => void; error: (e: unknown) => void };
+class FakeDecoder {
+  static all: FakeDecoder[] = [];
+  static throwOnConfigure = 0;
+  state = "unconfigured";
+  queue: number[] = [];
+  resets = 0;
+  init: FakeInit;
+  constructor(init: FakeInit) {
+    this.init = init;
+    FakeDecoder.all.push(this);
+  }
+  get decodeQueueSize() {
+    return this.queue.length;
+  }
+  configure() {
+    if (FakeDecoder.throwOnConfigure > 0) {
+      FakeDecoder.throwOnConfigure--;
+      throw new Error("configure falhou (simulado)");
+    }
+    this.state = "configured";
+  }
+  decode(c: { timestamp: number }) {
+    this.queue.push(c.timestamp);
+  }
+  /** Entrega o quadro mais velho (como o decodificador real, em ordem). */
+  out() {
+    const ts = this.queue.shift();
+    if (ts !== undefined) this.init.output({ timestamp: ts, close() {}, displayWidth: 640, displayHeight: 288 });
+  }
+  reset() {
+    this.queue = [];
+    this.resets++;
+    this.state = "unconfigured";
+  }
+  close() {
+    this.state = "closed";
+  }
+}
+const g = globalThis as unknown as Record<string, unknown>;
+g.VideoDecoder = FakeDecoder;
+g.EncodedVideoChunk = class {
+  timestamp: number;
+  constructor(o: { timestamp: number }) {
+    this.timestamp = o.timestamp;
+  }
+};
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const vframe = (key: boolean, pts: number) => encodeVideoFrame(key ? FrameType.VIDEO_KEY : FrameType.VIDEO_DELTA, pts, new Uint8Array([0, 0, 0, 1, key ? 0x65 : 0x41, 1, 2, 3]));
+
+/**
+ * Decodificador com latência fixa mas vazão cheia (pipeline de `depth` quadros: comum em decodificadores por hardware):
+ * a fila nunca cresce, mas fica > 2 com o mais velho esperando > 24 ms. Sem a escalada, a Baixa latência reiniciava o
+ * decoder e pedia keyframe sem parar (o e2e com decoder "lento" de 70 ms mostrou 22 reinícios em 5 s).
+ */
+async function pipelineRun(mode: "lowlat" | "legacy", rounds: number, depth = 4) {
+  FakeDecoder.all = [];
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  s.sendCtrl({ type: "video", mode });
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  let pts = 1_000_000;
+  for (let r = 0; r < rounds; r++) {
+    f.deliver(vframe(true, (pts += 16_667)));
+    await tick();
+    for (let i = 0; i < 10; i++) {
+      await sleepMs(8);
+      f.deliver(vframe(false, (pts += 16_667)));
+      await tick();
+      const d = FakeDecoder.all.at(-1)!;
+      while (d.decodeQueueSize > depth) d.out();
+    }
+    const d = FakeDecoder.all.at(-1)!;
+    while (d.decodeQueueSize) d.out(); // fim da rodada: tudo sai (progresso)
+  }
+  const st = { ...s.stats };
+  s.close();
+  return st;
+}
+
+test("revisão 0.3.4: contrapressão não entra em laço — decoder com latência fixa relaxa a Baixa latência depois de 3 reinícios", async () => {
+  const lo = await pipelineRun("lowlat", 6);
+  assert.equal(lo.bpResets, 3, `reinícios: ${lo.bpResets}`); // antes da correção: um por rodada (6) e sem fim
+  assert.equal(lo.bpRelaxed, 1);
+  const lg = await pipelineRun("legacy", 6);
+  assert.equal(lg.bpResets, 0, "Padrão (0.3.3): fila ≤ 6, nenhum reinício");
+  assert.equal(lg.bpRelaxed, 0);
+});
+
+test("revisão 0.3.4: configure que lança no reinício por contrapressão não derruba a sessão (vira erro de decodificador tratado)", async () => {
+  FakeDecoder.all = [];
+  const f = fakeOpener({ holdWrites: false });
+  const states: string[] = [];
+  const s = new UsbSession(f.opener as never, "123456", { onState: (x) => states.push(x.peer) });
+  s.sendCtrl({ type: "video", mode: "legacy" });
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  let pts = 1_000_000;
+  f.deliver(vframe(true, pts));
+  await tick();
+  FakeDecoder.throwOnConfigure = 1; // o configure do reinício vai lançar
+  for (let i = 0; i < 9; i++) {
+    f.deliver(vframe(false, (pts += 16_667)));
+    await tick();
+  }
+  assert.equal(s.stats.bpResets, 1);
+  assert.ok(FakeDecoder.all.length >= 2, "decoder recriado pelo caminho de erro");
+  // a sessão segue lendo: um CTRL depois do erro ainda chega
+  const seen: string[] = [];
+  (s as unknown as { l: { onCtrl?: (t: string) => void } }).l.onCtrl = (t) => seen.push(t);
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"status","scope":"x","ok":true,"text":"ainda vivo"}'));
+  await tick();
+  assert.deepEqual(seen, ['{"type":"status","scope":"x","ok":true,"text":"ainda vivo"}']);
+  assert.equal(states.at(-1), "connected");
+  s.close();
+});
+
+test("revisão 0.3.4: o `end` atrasado de um teste de flash não encerra o teste seguinte", async () => {
+  const f = fakeOpener({ holdWrites: false });
+  const s = new UsbSession(f.opener as never, "123456", { onState: () => {} });
+  s.setClock(() => ({ offsetMs: 0, uncertaintyMs: 5, rttMs: 10, n: 3 }));
+  await tick();
+  f.deliver(encodeText(FrameType.INFO, JSON.stringify({ width: 640, height: 288, fps: 60, codec: "avc1.42C01F" })));
+  await tick();
+  const a = s.startFlashTest();
+  await tick();
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"flashAck","n":0,"end":1,"pulses":5}')); // agenda o fim de A em 400 ms
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"status","scope":"flash","ok":false,"text":"falhou A"}'));
+  assert.equal((await a).error, "falhou A");
+  let bDone = false;
+  const b = s.startFlashTest().then((r) => ((bDone = true), r));
+  await sleepMs(600); // o temporizador de A disparou
+  assert.equal(bDone, false, "B continua em andamento");
+  f.deliver(encodeText(FrameType.CTRL, '{"type":"status","scope":"flash","ok":false,"text":"fim B"}'));
+  assert.equal((await b).error, "fim B");
   s.close();
 });

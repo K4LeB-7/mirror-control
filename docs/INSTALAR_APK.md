@@ -215,11 +215,18 @@ site novo (com app antigo a linha mostra "—"). Detalhes técnicos em [USB_PROT
 - *cod.*: captura + codificação no celular (mediana, medida pelo app). *cabo+dec.*: cabo ADB + fila + decodificação
   (mediana). *fila*: quadros esperando o decodificador do navegador. *fps*: quadros desenhados por segundo.
 - "—" na idade = app antigo, relógio ainda não sincronizado ou PTS não confirmado pelo app. Não é erro.
+- Com a tela PARADA o encoder repete o último quadro com um horário "novo": a idade e o *cod.* ficam menores que a
+  latência de uma mudança de verdade. Para comparar, deixe algo se mexendo na tela (ou use o botão abaixo).
 
 **Botão "Medir latência do vídeo"** (1 clique, leva ~3 s): o app pisca um quadrado branco/preto no **canto superior
 esquerdo da tela do celular** (5 pulsos) e o site mede quanto tempo cada pulso leva até aparecer no vídeo. Resultado na
-barra: `Latência real do vídeo: 62 ms (mín 55 · máx 70 · 5 pulsos, ±8 ms de relógio)`. É a medida mais confiável (não
-depende de PTS nem de a tela estar parada). Requisitos: serviço de **acessibilidade** ligado (o quadrado é uma janela dele;
+barra: `Latência real do vídeo: 62 ms (mín 55 · máx 70)`; passe o mouse para o detalhe (`5 pulsos medidos de 5; por
+pulso …; erro máximo do relógio ±N ms; captura − apresentação estimada M ms`). É a medida mais confiável (não depende
+de a tela estar parada). Como ler:
+- *captura − apresentação estimada* (sem depender do relógio do PC): o normal é entre 0 e ~10 ms. Se der muito negativo
+  ou muito acima de 20 ms, a estimativa do instante do pulso no celular não bate com este aparelho — mande o diagnóstico.
+- "Só N de 5 pulsos apareceram no vídeo" = o quadrado não entrou na captura de tela (ou o canto estava coberto). O site
+  não inventa número nesse caso; piscadas do próprio jogo no canto são ignoradas. Requisitos: serviço de **acessibilidade** ligado (o quadrado é uma janela dele;
 sem ele o site avisa "ative o serviço de acessibilidade…") e conteúdo qualquer na tela. O quadrado some sozinho ao
 terminar, ao desconectar ou ao desligar a acessibilidade. A margem "±N ms" é o erro máximo do relógio (metade da
 assimetria ida/volta, ≈ RTT/2); some ~1 quadro do monitor (8–17 ms) que fica depois do desenho no canvas.
@@ -227,7 +234,10 @@ assimetria ida/volta, ≈ RTT/2); some ~1 quadro do monitor (8–17 ms) que fica
 **Botão "Copiar diagnóstico"**: copia para a área de transferência um JSON com tudo (versões do site e do app, perfil de
 vídeo, decodificador, resolução/fps/bitrate, idade na tela e cada parcela, fila/descartes, fps recebido/decodificado/
 desenhado, maior IDR, entrada (RTT, tecla→celular, celular→toque), relógio (offset e incerteza), resultado do último
-teste de latência e dados do ADB). Cole numa conversa. Não inclui PIN, número de série nem a sala.
+teste de latência e dados do ADB: payload máximo, delayed ack, codinome/modelo do aparelho). Cole numa conversa. Não
+inclui PIN, número de série nem a sala. `video.sessao.stats.bpRelaxed` = 1 significa que o decodificador do navegador
+não acompanhou a "Baixa latência" (descartes suspensos até reconfigurar) — diga isso ao comparar; `relogio.saltos` > 0 =
+o relógio do celular saltou (dormiu) e a estimativa recomeçou.
 
 **Perfil de vídeo ("Baixa latência" × "Padrão (0.3.3)")**: caixa **Vídeo** da barra; a escolha fica salva no navegador.
 "Baixa latência" (padrão do site novo): desenho direto no decodificador (sem esperar o rAF), contrapressão mais curta,
